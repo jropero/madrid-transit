@@ -368,6 +368,170 @@ console.assert(
   'applyRealtime delay and cancellation',
 );
 
+// CRTM stop times (undocumented website endpoint, via rt.php). XML-to-JSON style: a single child
+// is an object, several are an array, none is an empty object.
+type One<T> = T | T[];
+type CrtmLine = { codLine?: string; shortDescription?: string };
+type CrtmTime = {
+  line?: CrtmLine;
+  destinationStop?: { name?: string };
+  time?: string;
+  codIssue?: string;
+};
+export type CrtmJson = {
+  stopTimes?: {
+    times?: { Time?: One<CrtmTime> };
+    linesStatus?: { LineStatus?: One<{ line?: CrtmLine; SAEStatus?: boolean | string }> };
+  };
+};
+export type CrtmRow = {
+  when: Date;
+  routeId: string;
+  line: string;
+  dest: string;
+  tram: boolean;
+  issue: string;
+};
+
+const many = <T>(v: One<T> | undefined): T[] => {
+  if (v === undefined || v === null) return [];
+  return Array.isArray(v) ? v : [v];
+};
+
+// Rows from CRTM, future only, in time order. Lines that report SAEStatus false (no live data
+// for them) are dropped so the timetable keeps covering them.
+export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
+  const st = json?.stopTimes;
+  const off = new Set(
+    many(st?.linesStatus?.LineStatus)
+      .filter(l => l.SAEStatus === false || l.SAEStatus === 'false')
+      .map(l => l.line?.codLine),
+  );
+  const rows: CrtmRow[] = [];
+  for (const t of many(st?.times?.Time)) {
+    const routeId = t.line?.codLine ?? '';
+    const when = new Date(t.time ?? '');
+    if (!routeId || off.has(routeId) || !(when.getTime() >= now.getTime())) continue;
+    rows.push({
+      when,
+      routeId,
+      line: t.line?.shortDescription ?? routeId,
+      dest: t.destinationStop?.name?.trim() ?? '',
+      tram: routeId.startsWith('10__'),
+      issue: t.codIssue ?? '',
+    });
+  }
+  return rows.sort((a, b) => a.when.getTime() - b.when.getTime());
+}
+
+// Merge rule: a line present in the CRTM rows uses the CRTM times; lines absent from it keep
+// their timetable departures. CRTM rows are limited to the usual 2 h window.
+export function mergeCrtm(
+  planned: Departure[],
+  rows: CrtmRow[] | null,
+  routes: RouteMap,
+  now: Date,
+): Departure[] {
+  if (!rows?.length) return planned;
+  const lines = new Set(rows.map(r => r.routeId));
+  const live = rows
+    .filter(r => r.when.getTime() <= now.getTime() + HORIZON_MS)
+    .map((r, i): Departure => ({
+      tripId: `crtm-${r.issue}-${r.routeId}-${i}`,
+      routeId: r.routeId,
+      line: routes[r.routeId]?.line ?? r.line,
+      color: routes[r.routeId]?.color ?? '#555555',
+      text: routes[r.routeId]?.text ?? '#ffffff',
+      dest: r.dest,
+      bus: true,
+      tram: r.tram,
+      planned: r.when,
+      expected: r.when,
+      cancelled: false,
+    }));
+  return [...planned.filter(d => !lines.has(d.routeId)), ...live].sort(
+    (a, b) => a.expected.getTime() - b.expected.getTime(),
+  );
+}
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T09:00:00Z');
+    const t = (cod: string, time: string) => ({
+      line: { codLine: cod, shortDescription: cod.slice(3, 6) },
+      destinationStop: { name: 'X' },
+      time,
+    });
+    const single = parseCrtm(
+      { stopTimes: { times: { Time: t('8__461___', '2026-11-25T10:05:00+01:00') } } },
+      now,
+    );
+    const array = parseCrtm(
+      {
+        stopTimes: {
+          times: {
+            Time: [
+              t('8__461___', '2026-11-25T10:20:00+01:00'),
+              t('8__461___', '2026-11-25T10:05:00+01:00'),
+              t('8__462___', '2026-11-25T10:30:00+01:00'),
+            ],
+          },
+          linesStatus: { LineStatus: { line: { codLine: '8__462___' }, SAEStatus: false } },
+        },
+      },
+      now,
+    );
+    const empty = parseCrtm({ stopTimes: { times: {} } }, now);
+    return (
+      single.length === 1 &&
+      single[0].when.toISOString() === '2026-11-25T09:05:00.000Z' &&
+      array.length === 2 &&
+      array[0].when.getTime() < array[1].when.getTime() &&
+      empty.length === 0 &&
+      parseCrtm(null, now).length === 0
+    );
+  })(),
+  'parseCrtm: single object, array (sorted, SAE false dropped), empty {}',
+);
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T09:00:00Z');
+    const dep = (routeId: string, iso: string): Departure => ({
+      tripId: iso + routeId,
+      routeId,
+      line: routeId,
+      color: '#000',
+      text: '#fff',
+      dest: 'H',
+      bus: true,
+      planned: new Date(iso),
+      expected: new Date(iso),
+      cancelled: false,
+    });
+    const row: CrtmRow = {
+      when: new Date('2026-11-25T09:07:00Z'),
+      routeId: 'A',
+      line: 'A',
+      dest: 'X',
+      tram: false,
+      issue: '1',
+    };
+    const out = mergeCrtm(
+      [dep('A', '2026-11-25T09:10:00Z'), dep('B', '2026-11-25T09:20:00Z')],
+      [row],
+      {},
+      now,
+    );
+    return (
+      out.length === 2 &&
+      out[0].routeId === 'A' &&
+      out[0].expected.toISOString() === '2026-11-25T09:07:00.000Z' &&
+      out[1].routeId === 'B' &&
+      mergeCrtm([dep('B', '2026-11-25T09:20:00Z')], [], {}, now).length === 1
+    );
+  })(),
+  'mergeCrtm: CRTM lines replace the timetable, other lines keep it',
+);
+
 // Departures still worth showing: not yet gone (30 s grace), within the horizon by plan.
 export const upcoming = (deps: Departure[], now: number) =>
   deps.filter(d => d.expected.getTime() >= now - 30_000);

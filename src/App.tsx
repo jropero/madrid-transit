@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppBar from './AppBar.tsx';
-import RefreshBar, { REFRESH_MS } from './RefreshBar.tsx';
+import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import Settings from './Settings.tsx';
 import Alerts, { AccessMark, AlertMark } from './Alerts.tsx';
 import {
   fetchAlerts,
+  fetchCrtm,
   fetchTripUpdates,
   isOffline,
   loadAllStops,
@@ -21,14 +22,17 @@ import {
   loadSaved,
   locate,
   madridDate,
+  mergeCrtm,
   nearStops,
   parseAlerts,
+  parseCrtm,
   saveSaved,
   scheduled,
   searchStops,
   townsOf,
   upcoming,
   type Alert,
+  type CrtmRow,
   type StopFile,
   type Departure,
   type NearStop,
@@ -70,8 +74,30 @@ function useStopDeps(id: string) {
 
 type Realtime = { trips: TripUpdates | null; alerts: Alert[]; offline: Date | null };
 
-// Live feeds: refresh 30s after the last load (manual or automatic) so the top-edge bar never
-// drifts; in the background just re-arm the timer. Failures keep the previous data.
+// Reload `ms` after the last load (manual or automatic) so the top-edge bar never drifts; in
+// the background just re-arm the timer. Also reloads as soon as the network is back.
+function usePolling(
+  active: boolean,
+  loadedAt: number | null,
+  load: () => unknown,
+  rearm: (at: number) => void,
+  ms: number,
+) {
+  useEffect(() => {
+    if (!active || loadedAt === null) return;
+    const id = setTimeout(() => (document.hidden ? rearm(Date.now()) : void load()), ms);
+    return () => clearTimeout(id);
+  }, [loadedAt, active, load, rearm, ms]);
+
+  useEffect(() => {
+    if (!active) return;
+    const on = () => void load();
+    window.addEventListener('online', on);
+    return () => window.removeEventListener('online', on);
+  }, [active, load]);
+}
+
+// Live feeds: failures keep the previous data.
 function useRealtime(active: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
   const [status, setStatus] = useState('Cargando…');
@@ -102,25 +128,54 @@ function useRealtime(active: boolean) {
   useEffect(() => {
     void load();
   }, [load]);
-
-  useEffect(() => {
-    if (!active || loadedAt === null) return;
-    const id = setTimeout(
-      () => (document.hidden ? setLoadedAt(Date.now()) : void load()),
-      REFRESH_MS,
-    );
-    return () => clearTimeout(id);
-  }, [loadedAt, active, load]);
-
-  // Back online: refresh immediately instead of waiting for the next tick.
-  useEffect(() => {
-    if (!active) return;
-    const on = () => void load();
-    window.addEventListener('online', on);
-    return () => window.removeEventListener('online', on);
-  }, [active, load]);
+  usePolling(active, loadedAt, load, setLoadedAt, REFRESH_MS);
 
   return { ...rt, status, setStatus, loadedAt, loading, load };
+}
+
+// "en vivo · CRTM 10:05" / "sin conexión · CRTM 10:05" (copy from that time) / "solo horario".
+function crtmStatus(rows: CrtmRow[], offline: Date | null, at: Date) {
+  if (!rows.length) return offline ? 'sin conexión · solo horario' : 'solo horario';
+  return offline ? `sin conexión · CRTM ${hhmm(offline)}` : `en vivo · CRTM ${hhmm(at)}`;
+}
+
+// CRTM stop times for a bus or tram stop, every 60 s while `active`; failures and empty
+// answers leave the timetable in charge.
+function useCrtm(stopId: string, active: boolean) {
+  const [got, setGot] = useState<{ id: string; rows: CrtmRow[] } | null>(null);
+  const [status, setStatus] = useState('Cargando…');
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const feed = await fetchCrtm(stopId);
+      const rows = parseCrtm(feed.data, new Date());
+      setGot({ id: stopId, rows });
+      setStatus(crtmStatus(rows, feed.offlineSince, new Date()));
+    } catch (err) {
+      setGot({ id: stopId, rows: [] });
+      setStatus(isOffline(err) ? 'sin conexión · solo horario' : 'solo horario');
+    } finally {
+      setLoading(false);
+      setLoadedAt(Date.now());
+    }
+  }, [stopId]);
+
+  useEffect(() => {
+    if (active) void load();
+  }, [active, load]);
+  usePolling(active, loadedAt, load, setLoadedAt, CRTM_REFRESH_MS);
+
+  return {
+    rows: got?.id === stopId ? got.rows : null,
+    status,
+    setStatus,
+    loadedAt,
+    loading,
+    load,
+  };
 }
 
 const groupKey = (d: Departure) => `${d.line}|${d.dest}`;
@@ -314,19 +369,23 @@ function useDepartureList(
   tt: Timetable | null,
   list: StopFile | null,
   trips: TripUpdates | null,
+  crtm: CrtmRow[] | null,
 ) {
   const now = useNow();
   const deps = useMemo(() => {
     if (!tt || !list) return [];
     const at = new Date(now);
     const planned = scheduled(list, tt.days, tt.routes, at);
-    // Buses are timetable only: live data applies to Renfe stops.
-    return upcoming(isBus(list) ? planned : applyRealtime(planned, trips), now);
-  }, [tt, list, trips, now]);
+    // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
+    const merged = isBus(list)
+      ? mergeCrtm(planned, crtm, tt.routes, at)
+      : applyRealtime(planned, trips);
+    return upcoming(merged, now);
+  }, [tt, list, trips, crtm, now]);
   return { deps, now };
 }
 
-// Departures pane: owns search and the 30s live refresh (only while `active`).
+// Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
   selected,
@@ -356,8 +415,10 @@ function Departures({
   const { tt, error } = useTimetable();
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
   const bus = isBus(stopDeps);
-  const rt = useRealtime(active && !bus);
-  const { deps, now } = useDepartureList(tt, stopDeps, rt.trips);
+  const renfe = useRealtime(active && !bus);
+  const crtm = useCrtm(selected.id, active && bus);
+  const rt = bus ? crtm : renfe;
+  const { deps, now } = useDepartureList(tt, stopDeps, renfe.trips, crtm.rows);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const wa = stopById.get(selected.id)?.wa ?? false;
@@ -395,13 +456,17 @@ function Departures({
   const empty = tt && stopDeps && groups.length === 0;
   return (
     <>
-      {active && !bus && <RefreshBar at={rt.loadedAt} loading={rt.loading} />}
+      {active && (
+        <RefreshBar
+          at={rt.loadedAt}
+          loading={rt.loading}
+          ms={bus ? CRTM_REFRESH_MS : REFRESH_MS}
+        />
+      )}
       {active && (
         <AppBar
           actions={[
-            ...(bus
-              ? []
-              : [{ icon: 'refresh' as const, label: 'Actualizar', onClick: rt.load }]),
+            { icon: 'refresh', label: 'Actualizar', onClick: rt.load },
             {
               icon: 'search',
               label: 'Buscar',
@@ -448,26 +513,21 @@ function Departures({
         />
       )}
 
-      {!bus && <Alerts alerts={rt.alerts} routeIds={routeIds} />}
+      {!bus && <Alerts alerts={renfe.alerts} routeIds={routeIds} />}
 
       {groups.map(([key, list]) => (
         <LineGroup
           key={key}
           list={list}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
-          hasAlert={!bus && rt.alerts.some(a => a.routeIds.includes(list[0].routeId))}
+          hasAlert={!bus && renfe.alerts.some(a => a.routeIds.includes(list[0].routeId))}
           now={now}
         />
       ))}
       {empty && <p className="status">sin salidas en las próximas 2 horas</p>}
 
       <p className="status">
-        {statusLine([
-          error,
-          depsError,
-          bus ? 'solo horario, sin datos en vivo' : rt.status,
-          expiryNote(tt, new Date(now), bus),
-        ])}
+        {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now), bus)])}
       </p>
     </>
   );

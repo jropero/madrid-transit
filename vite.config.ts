@@ -1,12 +1,27 @@
 import { defineConfig } from 'vite-plus';
 import react from '@vitejs/plugin-react';
 
+// The validated `stop` of a /m/rt.php?f=crtm request (same pattern as rt.php), else ''.
+const crtmStop = (path: string) => {
+  const stop = new URL(path, 'http://x').searchParams.get('stop') ?? '';
+  return /^(8|10)_\d{1,6}$/.test(stop) ? stop : '';
+};
+
 export default defineConfig({
   // Absolute base: relative paths break PWA manifest scope/icon resolution under /m/.
   base: '/m/',
   plugins: [react()],
   server: {
     proxy: {
+      // Dev stand-in for public/rt.php (crtm feed): same URL as production, straight to CRTM.
+      // Listed first so it wins; an invalid stop never leaves the dev server (bypass answers 404).
+      '^/m/rt\\.php\\?f=crtm(&|$)': {
+        target: 'https://www.crtm.es',
+        changeOrigin: true,
+        bypass: req => (crtmStop(req.url ?? '') ? undefined : false),
+        rewrite: path =>
+          `/widgets/api/GetStopsTimes.php?codStop=${crtmStop(path)}&type=1&orderBy=2&stopTimesByIti=3`,
+      },
       // Dev stand-in for public/rt.php: same URL as production, straight to Renfe's GTFS-RT JSON.
       '/m/rt.php': {
         target: 'https://gtfsrt.renfe.com',

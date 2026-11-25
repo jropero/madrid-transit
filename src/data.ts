@@ -1,6 +1,14 @@
 // Loading of the local timetable (public/data) and the live Renfe GTFS-RT feeds (via rt.php).
 import { loadJson, saveJson } from './storage.ts';
-import type { AlertFeed, DaysFile, StopFile, RouteMap, Stop, TripUpdates } from './gtfs.ts';
+import type {
+  AlertFeed,
+  CrtmJson,
+  DaysFile,
+  StopFile,
+  RouteMap,
+  Stop,
+  TripUpdates,
+} from './gtfs.ts';
 
 const base = import.meta.env.BASE_URL;
 
@@ -61,10 +69,14 @@ export const isOffline = (err: unknown) => err instanceof TypeError;
 type Feed<T> = { data: T; offlineSince: Date | null };
 
 // Online: fetch and remember. No network: the last stored copy (offlineSince = when it was fetched).
-async function fetchFeed<T>(name: string, slim: (raw: T) => T): Promise<Feed<T>> {
+async function fetchFeed<T>(
+  name: string,
+  query: string,
+  slim: (raw: T) => T,
+): Promise<Feed<T>> {
   const key = `madrid-transit:cache:rt:${name}`;
   try {
-    const data = slim(await getJson<T>(`${base}rt.php?f=${name}`));
+    const data = slim(await getJson<T>(`${base}rt.php?${query}`));
     saveJson(key, { at: Date.now(), data });
     return { data, offlineSince: null };
   } catch (err) {
@@ -74,5 +86,29 @@ async function fetchFeed<T>(name: string, slim: (raw: T) => T): Promise<Feed<T>>
   }
 }
 
-export const fetchTripUpdates = () => fetchFeed<TripUpdates>('trip_updates', slimTrips);
-export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', f => f);
+export const fetchTripUpdates = () =>
+  fetchFeed<TripUpdates>('trip_updates', 'f=trip_updates', slimTrips);
+export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f => f);
+
+// CRTM stop times for a bus or light-rail stop (`par_8_16578` -> `8_16578`). rt.php caches for
+// 60 s; the client memo does too, so re-renders and quick manual refreshes never refetch. The
+// last copy per stop is kept for offline (evictable cache entries).
+const CRTM_MEMO_MS = 60_000;
+const crtmMemo = new Map<string, { at: number; p: Promise<Feed<CrtmJson>> }>();
+export const fetchCrtm = (stopId: string) => {
+  const code = stopId.replace(/^par_/, '');
+  const hit = crtmMemo.get(code);
+  if (hit && Date.now() - hit.at < CRTM_MEMO_MS) return hit.p;
+  const p = fetchFeed<CrtmJson>(
+    `crtm:${code}`,
+    `f=crtm&stop=${encodeURIComponent(code)}`,
+    f => f,
+  );
+  crtmMemo.set(code, { at: Date.now(), p });
+  // Failures and offline copies are not memoised: the next refresh retries.
+  p.then(
+    f => f.offlineSince && crtmMemo.delete(code),
+    () => crtmMemo.delete(code),
+  );
+  return p;
+};
