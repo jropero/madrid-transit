@@ -50,7 +50,7 @@ jobs:
           SSH_PORT: ${{ secrets.SSH_PORT }}
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_KEY: ${{ secrets.SSH_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_HOST_FP: ${{ vars.SSH_HOST_FP }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
         run: |
           set -euo pipefail
@@ -62,8 +62,27 @@ jobs:
           install -d -m 700 ~/.ssh
           umask 077
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/deploy ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy
+          # Pin the host key by fingerprint instead of trusting whatever the scan returns.
+          if [ -z "${SSH_HOST_FP:-}" ]; then
+            echo "SSH_HOST_FP variable is empty; set it to the server's ED25519 SHA256 fingerprint" >&2
+            exit 1
+          fi
+          tmp="$(mktemp)"
+          ssh-keyscan -T 10 -t ed25519 -p "$SSH_PORT" "$SSH_HOST" 2>/dev/null > "$tmp"
+          if [ ! -s "$tmp" ]; then
+            echo "ssh-keyscan returned no ED25519 host key" >&2
+            exit 1
+          fi
+          got="$(ssh-keygen -lf "$tmp" -E sha256 | awk '{print $2}')"
+          if [ "$got" != "$SSH_HOST_FP" ]; then
+            echo "Host key fingerprint mismatch" >&2
+            echo "expected: $SSH_HOST_FP" >&2
+            echo "got:      $got" >&2
+            exit 1
+          fi
+          install -m 600 "$tmp" ~/.ssh/known_hosts
+          rm -f "$tmp"
           rsync -az --delete --delay-updates \
             -e "ssh -i $HOME/.ssh/deploy -p $SSH_PORT -o IdentitiesOnly=yes" \
             dist/ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"

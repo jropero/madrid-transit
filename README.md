@@ -44,8 +44,9 @@ One-time setup:
 
 1. `ssh-keygen -t ed25519 -f ~/.ssh/madrid_deploy -N '' -C madrid-transit-deploy`
 2. hPanel, Advanced, SSH Access: add `~/.ssh/madrid_deploy.pub`; note host, port (Hostinger usually `65002`) and user.
-3. `ssh-keyscan -p <port> <host> > /tmp/kh`, then connect once to check: `ssh -i ~/.ssh/madrid_deploy -p <port> <user>@<host> 'ls domains/ekult.co.uk/public_html'`.
-4. In this repo: `gh secret set NAP_TOKEN`, `gh secret set SSH_HOST`, `gh secret set SSH_PORT`, `gh secret set SSH_USER`, `gh secret set SSH_KEY < ~/.ssh/madrid_deploy`, `gh secret set SSH_KNOWN_HOSTS < /tmp/kh`, `gh variable set DEPLOY_PATH --body '/home/<user>/domains/ekult.co.uk/public_html/m'`.
+3. Copy the ED25519 "Huella digital de la clave del host" from hPanel → SSH Access and run `gh variable set SSH_HOST_FP --body 'SHA256:…'`. The deploy pins the host key to this fingerprint. Then connect once to check: `ssh -i ~/.ssh/madrid_deploy -p <port> <user>@<host> 'ls domains/ekult.co.uk/public_html'`.
+4. In this repo: `gh secret set NAP_TOKEN`, `gh secret set SSH_HOST`, `gh secret set SSH_PORT`, `gh secret set SSH_USER`, `gh secret set SSH_KEY < ~/.ssh/madrid_deploy`, `gh variable set DEPLOY_PATH --body '/home/<user>/domains/ekult.co.uk/public_html/m'`.
+5. The old `SSH_KNOWN_HOSTS` secret is no longer used; delete it with `gh secret delete SSH_KNOWN_HOSTS`.
 
 ## Not built
 
