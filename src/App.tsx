@@ -206,7 +206,7 @@ async function tryEmt(stopId: string): Promise<EmtLoad | null> {
   try {
     const feed = await fetchEmt(stopId);
     const rows = parseEmt(feed.data, new Date());
-    const alerts = parseEmtIncidents(feed.data);
+    const alerts = parseEmtIncidents(feed.data, new Date());
     return rows.length ? { rows, status: liveStatus('EMT', feed.offlineSince), alerts } : null;
   } catch {
     return null;

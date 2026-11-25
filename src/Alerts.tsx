@@ -85,7 +85,16 @@ function AlertRow({ alert, board }: { alert: Alert; board: AlertBoard }) {
       </button>
       {open && (
         <span id={id} className="alert-full">
+          {alert.when && <span lang="es">{alert.when} · </span>}
           <span lang="es">{alert.text}</span>
+          {alert.url && (
+            <>
+              {' '}
+              <a href={alert.url} target="_blank" rel="noopener">
+                Más información
+              </a>
+            </>
+          )}
           <button className="alert-hide" onClick={() => board.hide(alert)}>
             ocultar
           </button>

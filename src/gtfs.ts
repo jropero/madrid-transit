@@ -89,6 +89,11 @@ export type Alert = {
   title: string;
   text: string;
   from: Date | null;
+  to?: Date | null;
+  // Optional "more info" link (http/https only).
+  url?: string;
+  // Short Spanish validity line (EMT incidents), '' or absent when unknown.
+  when?: string;
 };
 export type AlertFeed = {
   entity?: {
@@ -705,7 +710,7 @@ export type EmtJson = {
   code?: string;
   data?: {
     Incident?: {
-      ListaIncident?: { data?: { guid?: string; title?: string; description?: string }[] };
+      ListaIncident?: { data?: EmtIncident[] };
     };
     Arrive?: {
       line?: string;
@@ -790,9 +795,33 @@ const plainText = (html: string) => {
   return raw.replace(/\s+/g, ' ').trim();
 };
 
-// Stop incidents from data[0].Incident.ListaIncident.data (deduplicated by guid); `Incident`
-// may be {} or missing. Shown as alerts that apply to the whole stop (no route ids).
-type EmtIncident = { guid?: string; title?: string; description?: string };
+// EMT validity stamps ("25/11/2026 11:30:00", "28/10/2026 6:30:00") are Madrid wall-clock time.
+// Unparseable -> null (unknown).
+const EMT_STAMP = /^(\d{1,2})\/(\d{1,2})\/(\d{4}) (\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+export function parseEmtStamp(s: string | undefined): Date | null {
+  const m = EMT_STAMP.exec(s?.trim() ?? '');
+  if (!m) return null;
+  const [d, mo, h, mi, sec] = [+m[1], +m[2], +m[4], +m[5], +(m[6] ?? 0)];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || sec > 59) return null;
+  return madridTime(`${m[3]}${pad(mo)}${pad(d)}`, h * 3600 + mi * 60 + sec);
+}
+
+// Whether a validity window is worth showing: not over, and starting within 24 h.
+const incidentLive = (from: Date | null, to: Date | null, now: Date) =>
+  (!to || to.getTime() > now.getTime()) && (!from || from.getTime() <= now.getTime() + DAY_MS);
+
+// Stop incidents from data[0].Incident.ListaIncident.data (deduplicated by guid and by text);
+// `Incident` may be {} or missing. Shown as alerts that apply to the whole stop (no route ids).
+// Expired incidents are dropped; ones starting more than 24 h from now stay hidden.
+type EmtIncident = {
+  guid?: string;
+  title?: string;
+  description?: string;
+  rssFrom?: string;
+  rssTo?: string;
+  moreInfo?: { '@url'?: string };
+};
+const safeUrl = (u?: string) => (u && /^https?:\/\//i.test(u.trim()) ? u.trim() : undefined);
 const toIncident = (i: EmtIncident | null | undefined): Alert | null => {
   const id = i?.guid?.trim();
   const title = i?.title?.trim() ?? '';
@@ -800,16 +829,124 @@ const toIncident = (i: EmtIncident | null | undefined): Alert | null => {
     .map(t => t?.trim() ?? '')
     .filter(Boolean)
     .join(' ');
-  return id && text ? { id, routeIds: [], title: title || text, text, from: null } : null;
+  if (!id || !text) return null;
+  const url = safeUrl(i?.moreInfo?.['@url']);
+  const from = parseEmtStamp(i?.rssFrom);
+  const to = parseEmtStamp(i?.rssTo);
+  return { id, routeIds: [], title: title || text, text, from, to, ...(url ? { url } : {}) };
 };
+const textKey = (a: Alert) => a.text.toLowerCase().replace(/\s+/g, ' ');
 
-export function parseEmtIncidents(json: EmtJson | null): Alert[] {
+export function parseEmtIncidents(json: EmtJson | null, now: Date): Alert[] {
   const list = json?.code === '00' ? json.data?.[0]?.Incident?.ListaIncident?.data : null;
   if (!Array.isArray(list)) return [];
-  const byId = new Map<string, Alert>();
-  for (const a of list.map(toIncident)) if (a && !byId.has(a.id)) byId.set(a.id, a);
-  return [...byId.values()];
+  const seen = new Set<string>();
+  const fresh = (a: Alert) => {
+    const keys = [`id:${a.id}`, `text:${textKey(a)}`];
+    const dup = keys.some(k => seen.has(k));
+    keys.forEach(k => seen.add(k));
+    return !dup;
+  };
+  return list
+    .map(toIncident)
+    .filter((a): a is Alert => a !== null && fresh(a))
+    .filter(a => incidentLive(a.from, a.to ?? null, now))
+    .map(a => ({ ...a, when: validityLine(a, now) }));
 }
+
+const dm = (d: Date) => {
+  const p = parts(d);
+  return `${p.d}/${pad(p.mo)}`;
+};
+const hm = (d: Date) => {
+  const p = parts(d);
+  return `${pad(p.h)}:${pad(p.mi)}`;
+};
+const stamp = (d: Date) => `${dm(d)} ${hm(d)}`;
+
+// Short Spanish validity line for an alert ('' when no dates): "25/11 11:30–15:00",
+// "desde 27/11 17:00" for an upcoming one, "hasta 25/11 15:00" when only the end is known.
+const range = (from: Date, to: Date) =>
+  dm(from) === dm(to) ? `${dm(from)} ${hm(from)}–${hm(to)}` : `${stamp(from)}–${stamp(to)}`;
+export function validityLine(a: Alert, now: Date): string {
+  const { from, to = null } = a;
+  if (from && to) return range(from, to);
+  if (!from) return to ? `hasta ${stamp(to)}` : '';
+  return from.getTime() > now.getTime() ? `desde ${stamp(from)}` : '';
+}
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T14:23:00Z'); // 15:23 Madrid
+    const stampOf = (h: number, d = 0) => {
+      const t = new Date(now.getTime() + h * 3600_000 + d * DAY_MS);
+      const p = parts(t);
+      return `${p.d}/${p.mo}/${p.y} ${p.h}:${pad(p.mi)}:00`;
+    };
+    const mk = (guid: string, rssFrom: string, rssTo: string, description = guid) => ({
+      guid,
+      title: 'Aviso',
+      description,
+      rssFrom,
+      rssTo,
+    });
+    const ids = (list: EmtIncident[]) =>
+      parseEmtIncidents(
+        { code: '00', data: [{ Incident: { ListaIncident: { data: list } } }] },
+        now,
+      )
+        .map(a => a.id)
+        .join();
+    const six = parseEmtStamp('28/10/2026 6:30:00');
+    const act = parseEmtStamp('25/11/2026 11:30:00');
+    const out = parseEmtIncidents(
+      {
+        code: '00',
+        data: [
+          {
+            Incident: {
+              ListaIncident: { data: [mk('a', '25/11/2026 11:30:00', '25/11/2026 15:00:00')] },
+            },
+          },
+        ],
+      },
+      now,
+    );
+    return (
+      ids([mk('old', stampOf(-30), stampOf(-24))]) === '' &&
+      ids([mk('on', stampOf(-3), stampOf(5))]) === 'on' &&
+      ids([mk('far', stampOf(48), stampOf(60))]) === '' &&
+      ids([mk('soon', stampOf(3), stampOf(9))]) === 'soon' &&
+      ids([mk('x', '', '', 'same'), mk('y', '', '', 'same')]) === 'x' &&
+      six?.toISOString() === '2026-10-28T05:30:00.000Z' &&
+      act?.toISOString() === '2026-11-25T10:30:00.000Z' &&
+      parseEmtStamp('garbage') === null &&
+      out.length === 0 &&
+      validityLine(
+        {
+          ...mk('v', '', ''),
+          id: 'v',
+          routeIds: [],
+          text: '',
+          from: act,
+          to: parseEmtStamp('25/11/2026 15:00:00'),
+        },
+        now,
+      ) === '25/11 11:30–15:00' &&
+      validityLine(
+        {
+          id: 'u',
+          routeIds: [],
+          title: '',
+          text: '',
+          from: parseEmtStamp('27/11/2026 17:00:00'),
+          to: null,
+        },
+        now,
+      ) === 'desde 27/11 17:00'
+    );
+  })(),
+  'parseEmtIncidents: expired dropped, active kept, >24 h ahead hidden, <24 h kept, 1-digit hour, text dedupe, validityLine',
+);
 console.assert(
   (() => {
     const inc = {
@@ -818,18 +955,18 @@ console.assert(
       description:
         "El 23 de noviembre  <b>hay</b> evento.<p><img src='http://x/y.png'></p>\n<p>Gracias</p>",
     };
-    const out = parseEmtIncidents({
-      code: '00',
-      data: [{ Incident: { ListaIncident: { data: [inc, inc] } } }],
-    });
+    const out = parseEmtIncidents(
+      { code: '00', data: [{ Incident: { ListaIncident: { data: [inc, inc] } } }] },
+      new Date(),
+    );
     return (
       out.length === 1 &&
       out[0].id === inc.guid &&
       out[0].text ===
         'Evento Deportivo: Zona Bernabéu. Afectadas 4 líneas de EMT. El 23 de noviembre hay evento. Gracias' &&
-      parseEmtIncidents({ code: '00', data: [{ Incident: {} }] }).length === 0 &&
-      parseEmtIncidents({ code: '00', data: [{}] }).length === 0 &&
-      parseEmtIncidents(null).length === 0
+      parseEmtIncidents({ code: '00', data: [{ Incident: {} }] }, new Date()).length === 0 &&
+      parseEmtIncidents({ code: '00', data: [{}] }, new Date()).length === 0 &&
+      parseEmtIncidents(null, new Date()).length === 0
     );
   })(),
   'parseEmtIncidents: docs example (deduped, HTML to text, image dropped), empty Incident, missing',
