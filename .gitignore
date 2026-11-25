@@ -12,3 +12,4 @@ dist-ssr
 .env
 .cache
 public/data
+public/rt-stops.php

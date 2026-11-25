@@ -43,6 +43,37 @@ jobs:
       - name: Sanity gate
         run: node scripts/check-dist.mjs dist
 
+      - name: PHP lint
+        run: php -l dist/rt.php && php -l dist/rt-stops.php
+
+      # Only requests that are rejected before any upstream fetch (bad format, unknown stop).
+      - name: rt.php smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -S 127.0.0.1:8099 -t dist > /tmp/php-server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:8099/rt.php && break
+            sleep 0.2
+          done
+          check() {
+            got="$(curl -s -o /tmp/smoke.out -w '%{http_code}' "http://127.0.0.1:8099/rt.php?$1")"
+            if [ "$got" != "$2" ]; then
+              echo "rt.php?$1: expected $2, got $got" >&2
+              cat /tmp/smoke.out >&2
+              exit 1
+            fi
+          }
+          check 'f=x' 400
+          check 'f=crtm&stop=8_999999999' 400
+          check 'f=crtm&stop=8_0' 404
+          check 'f=emt&stop=0' 404
+          # The allow-list file must not output anything when requested directly.
+          [ -z "$(curl -s http://127.0.0.1:8099/rt-stops.php)" ]
+          echo "rt.php smoke test ok"
+
       - name: Deploy
         shell: bash
         env:

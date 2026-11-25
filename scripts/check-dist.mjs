@@ -11,7 +11,7 @@ const ymdToMs = s => Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)
 console.assert(ymdToMs('19700102') === DAY_MS, 'ymdToMs');
 
 const missingFiles = () =>
-  ['data/stops.json', 'data/days.json', 'rt.php']
+  ['data/stops.json', 'data/days.json', 'rt.php', 'rt-stops.php']
     .filter(f => !existsSync(`${DIST}/${f}`))
     .map(f => `missing ${DIST}/${f}`);
 

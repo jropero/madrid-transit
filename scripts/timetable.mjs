@@ -23,7 +23,8 @@ import { gzipSync } from 'node:zlib';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const CACHE = `${ROOT}.cache/`;
-const OUT = `${ROOT}public/data/`;
+const PUBLIC = `${ROOT}public/`;
+const OUT = `${PUBLIC}data/`;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RENFE = {
   url: 'https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip',
@@ -906,6 +907,45 @@ async function writeRouteFiles(feeds) {
   return n;
 }
 
+// public/rt-stops.php: the stops rt.php may fetch live (keyed arrays for O(1) isset). EMT stop
+// numbers; CRTM codes `8_`/`10_`/`4_` from the stop ids (Metro: kept ids after the merge) and
+// `6_<emt number>` (fallback). Every key must match rt.php's regexes. Generated, not committed.
+const EMT_KEY = /^\d{1,6}$/;
+const CRTM_KEY = /^(4|6|8|10)_\d{1,6}$/;
+console.assert(CRTM_KEY.test('10_52') && !CRTM_KEY.test('8_0\n'), 'CRTM_KEY');
+
+function allowList(stops) {
+  const emt = new Set();
+  const crtm = new Set();
+  for (const s of stops) {
+    if (s.k === 'e') {
+      emt.add(s.code);
+      crtm.add(`6_${s.code}`);
+    } else if (/^par_(4|8|10)_\d+$/.test(s.id)) {
+      crtm.add(s.id.slice(4));
+    }
+  }
+  const bad = [...emt].filter(k => !EMT_KEY.test(k));
+  bad.push(...[...crtm].filter(k => !CRTM_KEY.test(k)));
+  if (bad.length)
+    throw new Error(`allow-list keys rejected by rt.php: ${bad.slice(0, 5).join(', ')}`);
+  return { emt: [...emt], crtm: [...crtm] };
+}
+
+// PHP single-quoted string: only \ and ' need escaping (keys are validated digits anyway).
+const phpKey = k => `'${k.replace(/[\\']/g, '\\$&')}' => 1`;
+const phpGroup = (name, keys) => `'${name}' => [${keys.map(phpKey).join(', ')}]`;
+
+async function writeAllowList(stops) {
+  const list = allowList(stops);
+  const php = `<?php return [${phpGroup('emt', list.emt)}, ${phpGroup('crtm', list.crtm)}];\n`;
+  await writeFile(`${PUBLIC}rt-stops.php`, php);
+  const by = Object.groupBy(list.crtm, k => k.split('_')[0]);
+  console.log(
+    `rt-stops.php ${kb(Buffer.byteLength(php))}: emt ${list.emt.length}, crtm 8_ ${by[8]?.length ?? 0}, 10_ ${by[10]?.length ?? 0}, 4_ ${by[4]?.length ?? 0}, 6_ ${by[6]?.length ?? 0}`,
+  );
+}
+
 const crtmLine = (name, f) =>
   f
     ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
@@ -978,6 +1018,7 @@ async function main() {
   await writeJson('days.json', renfe.days);
   await writeStopFiles(stops, renfe, [bus, ml].filter(Boolean));
   await writeRouteFiles([renfe, bus, ml, metro, emt]);
+  await writeAllowList(stops);
   report(renfe, bus, ml, metro, emt, stops, sz);
 }
 
