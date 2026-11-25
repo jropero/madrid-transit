@@ -746,6 +746,39 @@ export function parseEmt(json: EmtJson | null, now: Date): EmtRow[] {
     .sort((a, b) => a.when.getTime() - b.when.getTime());
 }
 
+// CRTM network-6 (EMT) rows use `6__21___`; routes.json and route files key them `emt_21`. The
+// short name is used as is ('001' and '1' are distinct EMT lines), else the id is unwrapped.
+export const emtRouteId = (codLine: string, short?: string) =>
+  `emt_${short?.trim() || codLine.replace(/^6__/, '').replace(/_+$/, '')}`;
+
+export const emtFromCrtm = (rows: CrtmRow[]): CrtmRow[] =>
+  rows.map(r =>
+    r.routeId.startsWith('6__')
+      ? { ...r, routeId: emtRouteId(r.routeId, r.line === r.routeId ? '' : r.line) }
+      : r,
+  );
+console.assert(
+  (() => {
+    const r = (routeId: string, line: string) => ({ routeId, line }) as CrtmRow;
+    const out = emtFromCrtm([
+      r('6__21___', '21'),
+      r('6__C03___', '6__C03___'),
+      r('6__001___', '001'),
+      r('8__1___', '1'),
+    ]);
+    return (
+      out[0].routeId === 'emt_21' &&
+      out[1].routeId === 'emt_C03' &&
+      emtRouteId('6__C03___') === 'emt_C03' &&
+      out[2].routeId === 'emt_001' &&
+      emtRouteId('6__001___') === 'emt_001' &&
+      emtRouteId('6__1___') === 'emt_1' &&
+      out[3].routeId === '8__1___'
+    );
+  })(),
+  'emtFromCrtm: 6__21___ -> emt_21, 6__C03___ -> emt_C03, leading zeros kept, other networks untouched',
+);
+
 // Plain text of an HTML fragment, never through innerHTML: DOMParser textContent (scripts
 // do not run and images load nothing in a parsed document), else tags stripped by regex.
 const plainText = (html: string) => {

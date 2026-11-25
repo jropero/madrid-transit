@@ -19,6 +19,7 @@ import {
   applyRealtime,
   daysUntil,
   emtDepartures,
+  emtFromCrtm,
   fmtDist,
   ddmm,
   hhmm,
@@ -216,7 +217,7 @@ async function tryEmt(stopId: string): Promise<EmtLoad | null> {
 async function tryCrtm(stopId: string): Promise<EmtLoad | null> {
   try {
     const feed = await fetchCrtm(`6_${stopId.replace(/^emt_/, '')}`);
-    const rows = parseCrtm(feed.data, new Date());
+    const rows = emtFromCrtm(parseCrtm(feed.data, new Date()));
     return rows.length
       ? { rows, status: liveStatus('CRTM', feed.offlineSince), alerts: [] }
       : null;
