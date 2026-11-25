@@ -26,6 +26,7 @@ import {
   saveSaved,
   scheduled,
   searchStops,
+  townsOf,
   upcoming,
   type Alert,
   type StopFile,
@@ -185,11 +186,14 @@ function LineGroup({
   );
 }
 
-// "bus · 17480 · Avda del Arco de la Victoria 3600" / "train".
+// "Parla · bus · 16578 · Calle Río Tajo 7" / "Parla · tren".
 const stopCaption = (s: Stop) =>
-  [s.k === 'b' ? 'bus' : 'tren', s.code, s.desc].filter(Boolean).join(' · ');
+  [s.town, s.k === 'b' ? 'bus' : 'tren', s.code, s.desc].filter(Boolean).join(' · ');
 
 function SearchPanel({
+  town,
+  onTown,
+  towns,
   query,
   onQuery,
   onSubmit,
@@ -198,6 +202,9 @@ function SearchPanel({
   onShow,
   onSave,
 }: {
+  town: string;
+  onTown: (t: string) => void;
+  towns: string[];
   query: string;
   onQuery: (q: string) => void;
   onSubmit: (e: React.FormEvent) => void | Promise<void>;
@@ -208,11 +215,26 @@ function SearchPanel({
 }) {
   return (
     <>
-      <form onSubmit={onSubmit} className="search">
+      <form onSubmit={onSubmit} className="search two">
         <input
           type="text"
-          aria-label="Nombre de la parada"
-          placeholder="nombre de la parada"
+          aria-label="Municipio"
+          placeholder="municipio"
+          list="towns"
+          value={town}
+          onChange={e => onTown(e.target.value)}
+        />
+        <datalist id="towns">
+          {towns.map(t => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </datalist>
+        <input
+          type="text"
+          aria-label="Parada, código o calle"
+          placeholder="parada, código o calle"
           value={query}
           onChange={e => onQuery(e.target.value)}
         />
@@ -311,8 +333,18 @@ function Departures({
   onStops: (next: Saved[]) => void;
 }) {
   const [query, setQuery] = useState('');
+  const [townQuery, setTownQuery] = useState('');
+  const [towns, setTowns] = useState<string[]>([]);
   const [results, setResults] = useState<(Stop & { dist?: number })[]>([]);
   const [showSearch, setShowSearch] = useState(false);
+
+  // Town suggestions for the first search box, loaded with the stop list when search opens.
+  useEffect(() => {
+    if (!showSearch || towns.length) return;
+    loadAllStops()
+      .then(all => setTowns(townsOf(all)))
+      .catch(() => undefined);
+  }, [showSearch, towns.length]);
   const { tt, error } = useTimetable();
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
   const bus = isBus(stopDeps);
@@ -321,6 +353,7 @@ function Departures({
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const wa = stopById.get(selected.id)?.wa ?? false;
+  const town = stopById.get(selected.id)?.town;
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
   const groups = groupDepartures(deps);
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
@@ -343,9 +376,9 @@ function Departures({
   async function search(e: React.FormEvent) {
     e.preventDefault();
     try {
-      const found = searchStops(await loadAllStops(), query);
+      const found = searchStops(await loadAllStops(), query, townQuery);
       setResults(found);
-      if (!found.length) rt.setStatus(`ninguna parada coincide con "${query.trim()}"`);
+      if (!found.length) rt.setStatus('ninguna parada coincide con la búsqueda');
     } catch (err) {
       rt.setStatus(isOffline(err) ? 'sin conexión · lista de paradas no cargada' : String(err));
     }
@@ -358,7 +391,9 @@ function Departures({
       {active && (
         <AppBar
           actions={[
-            { icon: 'refresh', label: 'Actualizar', onClick: rt.load },
+            ...(bus
+              ? []
+              : [{ icon: 'refresh' as const, label: 'Actualizar', onClick: rt.load }]),
             {
               icon: 'search',
               label: 'Buscar',
@@ -384,9 +419,13 @@ function Departures({
       <h2 className="title">
         {short(selected.name)} <AccessMark on={wa} />
       </h2>
+      {town && <small className="sub">{town}</small>}
 
       {showSearch && (
         <SearchPanel
+          town={townQuery}
+          onTown={setTownQuery}
+          towns={towns}
           query={query}
           onQuery={setQuery}
           onSubmit={search}

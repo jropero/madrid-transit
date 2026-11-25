@@ -27,6 +27,11 @@ const RENFE = {
   url: 'https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip',
   zip: `${CACHE}fomento.zip`,
 };
+const TOWN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const TOWN_CACHE = `${CACHE}crtm-stops.json`;
+const CRTM_URL =
+  'https://services5.arcgis.com/UxADft6QPcvFyDU1/arcgis/rest/services/M8_Red/FeatureServer/0/query';
+const NEAREST_TOWN_M = 1500;
 const BUS = {
   url: 'https://nap.transportes.gob.es/api/Fichero/download/1361',
   zip: `${CACHE}bus.zip`,
@@ -380,6 +385,120 @@ async function buildBus() {
   return { routes, stops, files, trips: trips.size };
 }
 
+// ---------------------------------------------------------------- Towns (CRTM open data)
+
+// Town names by INE code (Wikidata, committed). Untrusted-looking data is only ever parsed.
+const municipios = () => JSON.parse(readFileSync(`${ROOT}scripts/municipios.json`, 'utf8'));
+
+// One ArcGIS page: CODIGOESTACION (= GTFS stop_code) -> INE code (province + municipality).
+async function crtmPage(offset) {
+  const params = new URLSearchParams({
+    where: '1=1',
+    outFields: 'CODIGOESTACION,CODIGOMUNICIPIO,CODIGOPROVINCIA',
+    returnGeometry: 'false',
+    f: 'json',
+    resultOffset: String(offset),
+  });
+  const res = await fetch(`${CRTM_URL}?${params}`, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function crtmRecords() {
+  const records = [];
+  for (let more = true; more;) {
+    const page = await crtmPage(records.length);
+    const got = (page.features ?? []).map(f => f.attributes ?? {});
+    records.push(...got);
+    more = !!page.exceededTransferLimit && got.length > 0;
+  }
+  return records;
+}
+
+const ineOf = r =>
+  `${String(r.CODIGOPROVINCIA ?? '').padStart(2, '0')}${String(r.CODIGOMUNICIPIO ?? '').padStart(3, '0')}`;
+console.assert(ineOf({ CODIGOPROVINCIA: 28, CODIGOMUNICIPIO: '106' }) === '28106', 'ineOf');
+console.assert(ineOf({ CODIGOPROVINCIA: '5', CODIGOMUNICIPIO: 7 }) === '05007', 'ineOf pads');
+
+const readCache = () => {
+  try {
+    const data = JSON.parse(readFileSync(TOWN_CACHE, 'utf8'));
+    return Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+};
+const cacheFresh = () =>
+  existsSync(TOWN_CACHE) && Date.now() - statSync(TOWN_CACHE).mtimeMs < TOWN_MAX_AGE_MS;
+
+async function fetchRecords() {
+  const records = await crtmRecords();
+  if (!records.length) throw new Error('no records');
+  await writeFile(TOWN_CACHE, JSON.stringify(records));
+  return records;
+}
+
+// Cached for 7 days; a failed fetch falls back to any cache, else no towns (never fails).
+async function crtmData() {
+  mkdirSync(CACHE, { recursive: true });
+  const fresh = cacheFresh() ? readCache() : null;
+  if (fresh) return fresh;
+  try {
+    return await fetchRecords();
+  } catch (err) {
+    const old = readCache();
+    console.warn(
+      `CRTM town fetch failed (${err.message}): ${old ? 'using old cache' : 'no towns'}`,
+    );
+    return old ?? [];
+  }
+}
+
+// stop_code -> town name.
+async function townsByCode() {
+  const names = municipios();
+  const byCode = new Map();
+  for (const r of await crtmData()) {
+    const name = names[ineOf(r)];
+    if (name && r.CODIGOESTACION != null) byCode.set(String(r.CODIGOESTACION).trim(), name);
+  }
+  return byCode;
+}
+
+// Town of the nearest stop within 1,500 m, or ''.
+function nearestTown(s, withTown) {
+  const near = withTown
+    .map(b => ({ b, d: metres(s, b) }))
+    .filter(x => x.d <= NEAREST_TOWN_M)
+    .sort((x, y) => x.d - y.d)[0];
+  return near?.b.town ?? '';
+}
+
+// Bus stops get their town by code; Renfe stations (no code) the town of the nearest bus stop
+// within 1,500 m. Mutates the stops; returns how many of each got a town.
+function assignTowns(renfeStops, busStops, byCode) {
+  for (const s of busStops) s.town = byCode.get(s.code) ?? '';
+  const withTown = busStops.filter(s => s.town);
+  for (const s of renfeStops) s.town = nearestTown(s, withTown);
+  return {
+    bus: withTown.length,
+    busAll: busStops.length,
+    renfe: renfeStops.filter(s => s.town).length,
+    renfeAll: renfeStops.length,
+  };
+}
+
+// Equirectangular approximation (same as src/gtfs.ts).
+const metres = (a, b) => {
+  const k = 111_320;
+  const x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180));
+  return Math.round(Math.hypot(x, (b.lat - a.lat) * k));
+};
+console.assert(
+  Math.abs(metres({ lat: 40.4065, lon: -3.6893 }, { lat: 40.4723, lon: -3.6826 }) - 7300) < 400,
+  'metres',
+);
+
 // ---------------------------------------------------------------- Output
 
 const kb = n => `${(n / 1024).toFixed(0)} KB`;
@@ -423,6 +542,10 @@ function report(renfe, bus, stops, sz) {
 async function main() {
   const renfe = await buildRenfe();
   const bus = await buildBus();
+  const t = assignTowns(renfe.stops, bus?.stops ?? [], bus ? await townsByCode() : new Map());
+  console.log(
+    `towns: bus ${t.bus}/${t.busAll}, renfe ${t.renfe}/${t.renfeAll} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
+  );
   const stops = [...renfe.stops, ...(bus?.stops ?? [])].sort((a, b) =>
     a.name.localeCompare(b.name, 'es'),
   );

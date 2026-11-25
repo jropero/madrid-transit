@@ -304,6 +304,15 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+.search.two {
+  flex-wrap: wrap;
+}
+
+/* Town box on its own line, stop box + button below. */
+.search.two input:first-of-type {
+  flex-basis: 100%;
+}
+
 .search input {
   flex: 1;
   min-width: 0;
@@ -526,6 +535,14 @@ button:disabled {
   color: var(--muted);
   font-size: var(--t-small);
   text-transform: lowercase;
+}
+
+.title + .sub {
+  display: block;
+  margin-top: -8px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: var(--t-small);
 }
 
 .route.sm {

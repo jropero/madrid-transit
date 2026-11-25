@@ -11,6 +11,7 @@ export type Stop = {
   k?: 'r' | 'b';
   code?: string;
   desc?: string;
+  town?: string; // municipality (CRTM open data), empty when unknown
 };
 export type RouteInfo = { line: string; color: string; text: string; name?: string };
 export type RouteMap = Record<string, RouteInfo>;
@@ -388,26 +389,48 @@ export const alertsFor = (alerts: Alert[], routeIds: Set<string>) =>
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 console.assert(fold('Chamartín') === 'chamartin', 'fold');
 
-// Accent-insensitive substring search over every word of the name.
-// Ranks a stop for a search: exact stop code, name prefix, name substring, street; null = no match.
-const rank = (s: Stop, needle: string): number | null => {
+// Ranks a stop for a search: exact stop code, name prefix or exact town ("parla" lists the
+// stops in Parla), name substring, town substring, street; null = no match.
+const rankWhole = (s: Stop, needle: string): number | null => {
   const name = fold(s.name);
+  const town = fold(s.town ?? '');
   if (s.code === needle) return 0;
-  if (name.startsWith(needle)) return 1;
+  if (name.startsWith(needle) || town === needle) return 1;
   if (name.includes(needle)) return 2;
-  return fold(s.desc ?? '').includes(needle) ? 3 : null;
+  if (town.includes(needle)) return 3;
+  return fold(s.desc ?? '').includes(needle) ? 4 : null;
 };
 
-export const searchStops = (stops: Stop[], q: string): Stop[] => {
-  const needle = fold(q.trim());
-  if (!needle) return [];
-  return stops
+// Several words ("parla tajo"): each must appear in the code, name, town or street.
+const rank = (s: Stop, needle: string): number | null => {
+  const whole = rankWhole(s, needle);
+  if (whole !== null || !needle.includes(' ')) return whole;
+  const hay = fold(`${s.code ?? ''} ${s.name} ${s.town ?? ''} ${s.desc ?? ''}`);
+  return needle.split(' ').every(w => hay.includes(w)) ? 5 : null;
+};
+
+// Stops in a town: exact town name first, else any town containing the text.
+const inTown = (stops: Stop[], town: string): Stop[] => {
+  const t = fold(town.trim());
+  if (!t) return stops;
+  const exact = stops.filter(s => fold(s.town ?? '') === t);
+  return exact.length ? exact : stops.filter(s => fold(s.town ?? '').includes(t));
+};
+
+const byName = (a: Stop, b: Stop) => a.name.localeCompare(b.name, 'es');
+
+// Town only: every stop in that town by name. Stop text: ranked matches (within the town).
+export const searchStops = (stops: Stop[], q: string, town = ''): Stop[] => {
+  const pool = inTown(stops, town);
+  const needle = fold(q.trim()).replaceAll(/\s+/g, ' ');
+  if (!needle) return town.trim() ? pool.toSorted(byName) : [];
+  return pool
     .flatMap(s => {
       const r = rank(s, needle);
       return r === null ? [] : [{ s, r }];
     })
     .sort((a, b) => a.r - b.r)
-    .slice(0, 15)
+    .slice(0, 40)
     .map(x => x.s);
 };
 console.assert(
@@ -420,6 +443,60 @@ console.assert(
   )[0].id === 'b',
   'searchStops ranks prefix matches first',
 );
+console.assert(
+  (() => {
+    const base = { lat: 0, lon: 0, wa: false };
+    const found = searchStops(
+      [
+        { ...base, id: 'street', name: 'Z', desc: 'Calle Parla 1' },
+        { ...base, id: 'town', name: 'Y', town: 'Parla' },
+        { ...base, id: 'name', name: 'X Parla' },
+        { ...base, id: 'prefix', name: 'Parlamento' },
+        { ...base, id: 'code', name: 'W', code: 'parla' },
+        { ...base, id: 'accent', name: 'V', town: 'Parlá' },
+      ],
+      'parla',
+    ).map(s => s.id);
+    return found.join() === 'code,town,prefix,accent,name,street';
+  })(),
+  'searchStops ranks code, prefix/exact town, substring, town, street',
+);
+console.assert(
+  searchStops(
+    [
+      { id: 'a', name: 'RÍO TAJO-RÍO GUADARRAMA', town: 'Parla', lat: 0, lon: 0, wa: false },
+      { id: 'b', name: 'RÍO TAJO', town: 'Toledo', lat: 0, lon: 0, wa: false },
+    ],
+    'parla  tajo',
+  )
+    .map(s => s.id)
+    .join() === 'a',
+  'searchStops matches every word across fields',
+);
+console.assert(
+  (() => {
+    const base = { lat: 0, lon: 0, wa: false };
+    const stops = [
+      { ...base, id: 'p2', name: 'Río Tajo', town: 'Parla' },
+      { ...base, id: 'p1', name: 'Alfonso XIII', town: 'Parla' },
+      { ...base, id: 't', name: 'Río Tajo', town: 'Toledo' },
+    ];
+    return (
+      searchStops(stops, '', 'parla')
+        .map(s => s.id)
+        .join() === 'p1,p2' &&
+      searchStops(stops, 'tajo', 'Parla')
+        .map(s => s.id)
+        .join() === 'p2'
+    );
+  })(),
+  'searchStops filters by town',
+);
+
+export const townsOf = (stops: Stop[]): string[] =>
+  [...new Set(stops.flatMap(s => (s.town ? [s.town] : [])))].sort((a, b) =>
+    a.localeCompare(b, 'es'),
+  );
 
 // Equirectangular approximation: fine at city scale.
 export const metres = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
