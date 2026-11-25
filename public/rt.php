@@ -158,7 +158,8 @@ function emt_arrivals(string $stop, string $token): array {
             'cultureInfo' => 'ES',
             'Text_StopRequired_YN' => 'N',
             'Text_EstimationsRequired_YN' => 'Y',
-            'Text_IncidencesRequired_YN' => 'N',
+            'Text_IncidencesRequired_YN' => 'Y',
+            'DateTime_Referenced_Incidencies_YYYYMMDD' => (new DateTime('now', new DateTimeZone('Europe/Madrid')))->format('Ymd'),
         ])
     );
     $j = $status === 200 && $body !== null ? json_decode($body, true) : null;

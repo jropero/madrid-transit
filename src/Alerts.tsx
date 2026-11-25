@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Icon } from './icons.tsx';
 import { alertsFor, type Alert } from './gtfs.ts';
 
-// Service alerts for the routes on screen (Spanish, as supplied by Renfe); tap to expand.
+// Service alerts for the routes on screen (Spanish, as supplied by Renfe or EMT); tap to expand.
 export default function Alerts({
   alerts,
   routeIds,

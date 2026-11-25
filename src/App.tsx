@@ -31,6 +31,7 @@ import {
   parseAlerts,
   parseCrtm,
   parseEmt,
+  parseEmtIncidents,
   saveSaved,
   scheduled,
   searchStops,
@@ -193,7 +194,7 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean) {
   };
 }
 
-type EmtLoad = { rows: EmtRow[]; status: string };
+type EmtLoad = { rows: EmtRow[]; status: string; alerts: Alert[] };
 
 const liveStatus = (label: string, offline: Date | null) =>
   offline
@@ -204,7 +205,8 @@ async function tryEmt(stopId: string): Promise<EmtLoad | null> {
   try {
     const feed = await fetchEmt(stopId);
     const rows = parseEmt(feed.data, new Date());
-    return rows.length ? { rows, status: liveStatus('EMT', feed.offlineSince) } : null;
+    const alerts = parseEmtIncidents(feed.data);
+    return rows.length ? { rows, status: liveStatus('EMT', feed.offlineSince), alerts } : null;
   } catch {
     return null;
   }
@@ -215,7 +217,9 @@ async function tryCrtm(stopId: string): Promise<EmtLoad | null> {
   try {
     const feed = await fetchCrtm(`6_${stopId.replace(/^emt_/, '')}`);
     const rows = parseCrtm(feed.data, new Date());
-    return rows.length ? { rows, status: liveStatus('CRTM', feed.offlineSince) } : null;
+    return rows.length
+      ? { rows, status: liveStatus('CRTM', feed.offlineSince), alerts: [] }
+      : null;
   } catch {
     return null;
   }
@@ -224,7 +228,7 @@ async function tryCrtm(stopId: string): Promise<EmtLoad | null> {
 async function loadEmtRows(stopId: string): Promise<EmtLoad> {
   return (
     (await tryEmt(stopId)) ??
-    (await tryCrtm(stopId)) ?? { rows: [], status: 'sin datos en vivo' }
+    (await tryCrtm(stopId)) ?? { rows: [], status: 'sin datos en vivo', alerts: [] }
   );
 }
 
@@ -251,6 +255,7 @@ function useEmt(stopId: string, active: boolean) {
 
   return {
     rows: got?.id === stopId ? got.rows : null,
+    alerts: got?.id === stopId ? got.alerts : [],
     status,
     setStatus,
     loadedAt,
@@ -520,8 +525,9 @@ const pickFeed = <A, B, C>(
   return kind.crtm ? f.crtm : f.renfe;
 };
 
-// Only Renfe stops have alerts.
-const alertsOf = (renfeStop: boolean, alerts: Alert[]) => (renfeStop ? alerts : []);
+// Renfe stops have route alerts, EMT stops their own incidents; the rest none.
+const alertsOf = (renfeStop: boolean, alerts: Alert[], emt: Alert[]) =>
+  renfeStop ? alerts : emt;
 const refreshMs = (crtm: boolean) => (crtm ? CRTM_REFRESH_MS : REFRESH_MS);
 
 // Timetable file loaded (Renfe, bus) or the live answer in (EMT and Metro stops have no file).
@@ -592,7 +598,7 @@ function Departures({
     metro: isMetro,
   });
   const renfeStop = !useCrtmFeed && !isEmt;
-  const alerts = alertsOf(renfeStop, renfe.alerts);
+  const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const info = useStopInfo(selected.id, stopById, !!tt);
@@ -744,7 +750,6 @@ function usePivot() {
   const frame = useRef(0);
   const viewRef = useRef<View>('departures');
   const [view, setView] = useState<View>('departures');
-  const [turn, setTurn] = useState<View | null>(null);
 
   const onScroll = () => {
     if (frame.current) return;
@@ -756,7 +761,6 @@ function usePivot() {
       viewRef.current = next;
       syncHistory(next);
       setView(next);
-      setTurn(next);
     });
   };
 
@@ -775,7 +779,7 @@ function usePivot() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  return { scroller, view, turn, onScroll, goTo };
+  return { scroller, view, onScroll, goTo };
 }
 
 // Big lowercase headers, looping like a Windows Phone pivot: the active one comes first,
@@ -822,7 +826,7 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
   const [selected, setSelected] = useState<Saved>(stops[0]);
-  const { scroller, view, turn, onScroll, goTo } = usePivot();
+  const { scroller, view, onScroll, goTo } = usePivot();
 
   function updateStops(next: Saved[]) {
     setStops(next);
@@ -831,7 +835,7 @@ export default function App() {
 
   const pane = (v: View, children: React.ReactNode) => (
     <section className="pane" aria-label={VIEW_LABEL[v]} inert={view !== v}>
-      <div className={turn === v ? 'pane-in turn' : 'pane-in'}>{children}</div>
+      <div className={v === 'departures' ? 'pane-in turn' : 'pane-in'}>{children}</div>
     </section>
   );
 

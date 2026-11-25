@@ -569,6 +569,9 @@ console.assert(
 export type EmtJson = {
   code?: string;
   data?: {
+    Incident?: {
+      ListaIncident?: { data?: { guid?: string; title?: string; description?: string }[] };
+    };
     Arrive?: {
       line?: string;
       destination?: string;
@@ -607,6 +610,61 @@ export function parseEmt(json: EmtJson | null, now: Date): EmtRow[] {
     }))
     .sort((a, b) => a.when.getTime() - b.when.getTime());
 }
+
+// Plain text of an HTML fragment, never through innerHTML: DOMParser textContent (scripts
+// do not run and images load nothing in a parsed document), else tags stripped by regex.
+const plainText = (html: string) => {
+  const doc =
+    typeof DOMParser === 'undefined'
+      ? null
+      : new DOMParser().parseFromString(html, 'text/html');
+  const raw = doc ? (doc.body.textContent ?? '') : html.replace(/<[^>]*>/g, ' ');
+  return raw.replace(/\s+/g, ' ').trim();
+};
+
+// Stop incidents from data[0].Incident.ListaIncident.data (deduplicated by guid); `Incident`
+// may be {} or missing. Shown as alerts that apply to the whole stop (no route ids).
+type EmtIncident = { guid?: string; title?: string; description?: string };
+const toIncident = (i: EmtIncident | null | undefined): Alert | null => {
+  const id = i?.guid?.trim();
+  const text = [i?.title, i?.description && plainText(i.description)]
+    .map(t => t?.trim() ?? '')
+    .filter(Boolean)
+    .join(' ');
+  return id && text ? { id, routeIds: [], text, from: null } : null;
+};
+
+export function parseEmtIncidents(json: EmtJson | null): Alert[] {
+  const list = json?.code === '00' ? json.data?.[0]?.Incident?.ListaIncident?.data : null;
+  if (!Array.isArray(list)) return [];
+  const byId = new Map<string, Alert>();
+  for (const a of list.map(toIncident)) if (a && !byId.has(a.id)) byId.set(a.id, a);
+  return [...byId.values()];
+}
+console.assert(
+  (() => {
+    const inc = {
+      title: 'Evento Deportivo: Zona Bernabéu. Afectadas 4 líneas de EMT.',
+      guid: 'CE371CE0-ECBC-4897-866F-4F1B681B28DE',
+      description:
+        "El 23 de noviembre  <b>hay</b> evento.<p><img src='http://x/y.png'></p>\n<p>Gracias</p>",
+    };
+    const out = parseEmtIncidents({
+      code: '00',
+      data: [{ Incident: { ListaIncident: { data: [inc, inc] } } }],
+    });
+    return (
+      out.length === 1 &&
+      out[0].id === inc.guid &&
+      out[0].text ===
+        'Evento Deportivo: Zona Bernabéu. Afectadas 4 líneas de EMT. El 23 de noviembre hay evento. Gracias' &&
+      parseEmtIncidents({ code: '00', data: [{ Incident: {} }] }).length === 0 &&
+      parseEmtIncidents({ code: '00', data: [{}] }).length === 0 &&
+      parseEmtIncidents(null).length === 0
+    );
+  })(),
+  'parseEmtIncidents: docs example (deduped, HTML to text, image dropped), empty Incident, missing',
+);
 
 // EMT rows as departures (tile colour from routes.json).
 export const emtDepartures = (rows: EmtRow[], routes: RouteMap): Departure[] =>
@@ -725,8 +783,9 @@ console.assert(
   'parseAlerts keeps only 10T routes',
 );
 
+// Alerts without route ids (EMT stop incidents) apply to the whole stop.
 export const alertsFor = (alerts: Alert[], routeIds: Set<string>) =>
-  alerts.filter(a => a.routeIds.some(r => routeIds.has(r)));
+  alerts.filter(a => !a.routeIds.length || a.routeIds.some(r => routeIds.has(r)));
 
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 console.assert(fold('Chamartín') === 'chamartin', 'fold');
