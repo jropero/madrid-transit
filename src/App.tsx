@@ -154,6 +154,12 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
 
 const MAX_PER_GROUP = 4;
 
+// Tile caption: timetable-only departures are 'tranvía' (light rail) or 'bus'.
+const modeLabel = (d: Departure) => {
+  if (d.tram) return 'tranvía';
+  return d.bus ? 'bus' : 'cercanías';
+};
+
 function LineGroup({
   list,
   destName,
@@ -171,7 +177,7 @@ function LineGroup({
     <section className="group">
       <span className="tile" style={tile}>
         <b>{head.line}</b>
-        <small>{head.bus ? 'bus' : 'cercanías'}</small>
+        <small>{modeLabel(head)}</small>
       </span>
       <span className="deps">
         <span className="dest">
@@ -186,9 +192,11 @@ function LineGroup({
   );
 }
 
-// "Parla · bus · 16578 · Calle Río Tajo 7" / "Parla · tren".
+const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía' };
+
+// "Parla · bus · 16578 · Calle Río Tajo 7" / "Parla · tranvía · 52 · Calle X" / "Parla · tren".
 const stopCaption = (s: Stop) =>
-  [s.town, s.k === 'b' ? 'bus' : 'tren', s.code, s.desc].filter(Boolean).join(' · ');
+  [s.town, STOP_MODE[s.k ?? ''] ?? 'tren', s.code, s.desc].filter(Boolean).join(' · ');
 
 function SearchPanel({
   town,

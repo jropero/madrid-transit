@@ -1,5 +1,6 @@
 // Builds the static Madrid timetable into public/data/: Renfe Cercanías (route_id 10T…) and, when
-// available, CRTM interurban buses (NAP feed 1361, timetable only). Plain Node, no dependencies.
+// available, CRTM interurban buses (NAP feed 1361) and light rail (Metro Ligero ML1-ML3, Tranvía
+// de Parla ML4; CRTM open data), both timetable only. Plain Node, no dependencies.
 // The downloaded GTFS zips are untrusted data: they are only parsed (never executed), live in
 // .cache/, and single files are streamed through `unzip -p` (shapes.txt is never extracted).
 import { spawn } from 'node:child_process';
@@ -28,13 +29,32 @@ const RENFE = {
   zip: `${CACHE}fomento.zip`,
 };
 const TOWN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const TOWN_CACHE = `${CACHE}crtm-stops.json`;
-const CRTM_URL =
-  'https://services5.arcgis.com/UxADft6QPcvFyDU1/arcgis/rest/services/M8_Red/FeatureServer/0/query';
+const CRTM_LAYERS = 'https://services5.arcgis.com/UxADft6QPcvFyDU1/arcgis/rest/services';
 const NEAREST_TOWN_M = 1500;
+// CRTM feeds sharing one pipeline. k: stop kind in stops.json; auth: needs the NAP ApiKey header;
+// layer + townCache: the ArcGIS layer (CODIGOESTACION = stop_code) that gives each stop its town.
 const BUS = {
+  key: 'bus',
+  label: 'bus',
+  k: 'b',
+  color: '8EBF42',
+  auth: true,
   url: 'https://nap.transportes.gob.es/api/Fichero/download/1361',
   zip: `${CACHE}bus.zip`,
+  layer: 'M8_Red',
+  townCache: `${CACHE}crtm-stops.json`,
+};
+// Light rail: public ArcGIS item (no key), 417 KB.
+const ML = {
+  key: 'ml',
+  label: 'light rail',
+  k: 't',
+  color: '7DB713',
+  auth: false,
+  url: 'https://www.arcgis.com/sharing/rest/content/items/aaed26cc0ff64b0c947ac0bc3e033196/data',
+  zip: `${CACHE}ml.zip`,
+  layer: 'M10_Red',
+  townCache: `${CACHE}crtm-m10.json`,
 };
 
 // Minimal CSV line split with quote support; every field is trimmed (GTFS here is space-padded).
@@ -100,23 +120,30 @@ async function ensureRenfe() {
   else await download(RENFE);
 }
 
-// A cached zip younger than 24 h needs no token. Returns false when buses must be skipped.
-async function ensureBus() {
+// Request headers of a feed; null when it needs a NAP token that is missing.
+function feedHeaders(feed) {
+  if (!feed.auth) return {};
+  const token = napToken();
+  return token ? { ApiKey: token } : null;
+}
+
+// A cached zip younger than 24 h needs no token. Returns false when the feed must be skipped.
+async function ensureFeed(feed) {
   mkdirSync(CACHE, { recursive: true });
-  if (fresh(BUS.zip)) {
-    console.log('using cached bus zip');
+  if (fresh(feed.zip)) {
+    console.log(`using cached ${feed.label} zip`);
     return true;
   }
-  const token = napToken();
-  if (!token) {
-    console.warn('NAP_TOKEN missing and no fresh .cache/bus.zip: skipping buses (Renfe only)');
+  const headers = feedHeaders(feed);
+  if (!headers) {
+    console.warn(`NAP_TOKEN missing and no fresh ${feed.zip}: skipping ${feed.label}`);
     return false;
   }
   try {
-    await download(BUS, { ApiKey: token });
+    await download(feed, headers);
   } catch (err) {
-    console.warn(`bus download failed (${err.message}): skipping buses`);
-    return existsSync(BUS.zip);
+    console.warn(`${feed.label} download failed (${err.message}): skipping`);
+    return existsSync(feed.zip);
   }
   return true;
 }
@@ -135,7 +162,7 @@ async function* rows(zip, name) {
   for await (const line of rl) {
     if (!line.trim()) continue;
     const f = splitCsv(line);
-    if (!head) head = f;
+    if (!head) head = f.map(h => h.replace(/^\uFEFF/, ''));
     else yield Object.fromEntries(head.map((h, i) => [h, f[i] ?? '']));
   }
   await done;
@@ -271,14 +298,15 @@ async function buildRenfe() {
 
 // ---------------------------------------------------------------- Buses
 
-async function busRoutes(zip) {
+async function busRoutes(zip, feed) {
   const routes = {};
   for await (const r of rows(zip, 'routes.txt')) {
     routes[r.route_id] = {
       line: r.route_short_name,
-      color: `#${r.route_color || '8EBF42'}`,
+      color: `#${r.route_color || feed.color}`,
       text: `#${r.route_text_color || 'FFFFFF'}`,
       name: r.route_long_name,
+      ...(feed.k === 't' && { tram: true }),
     };
   }
   return routes;
@@ -354,7 +382,7 @@ function busFiles(trips, byTrip, cals) {
   return files;
 }
 
-async function busStops(zip, served) {
+async function busStops(zip, served, feed) {
   const stops = [];
   for await (const s of rows(zip, 'stops.txt')) {
     if (!served.has(s.stop_id)) continue;
@@ -364,7 +392,7 @@ async function busStops(zip, served) {
       lat: coord(s.stop_lat),
       lon: coord(s.stop_lon),
       wa: false,
-      k: 'b',
+      k: feed.k,
       code: s.stop_code,
       desc: s.stop_desc,
     });
@@ -372,16 +400,17 @@ async function busStops(zip, served) {
   return stops;
 }
 
-async function buildBus() {
-  if (!(await ensureBus())) return null;
-  const zip = BUS.zip;
-  const routes = await busRoutes(zip);
+// Bus and light rail share this step (same GTFS shape, same per-stop file format).
+async function buildCrtm(feed) {
+  if (!(await ensureFeed(feed))) return null;
+  const zip = feed.zip;
+  const routes = await busRoutes(zip, feed);
   const trips = await busTrips(zip, routes);
   const used = new Set([...trips.values()].map(t => t.serviceId));
   const cals = await busCalendars(zip, used);
   const byTrip = await loadByTrip(zip, trips);
   const files = busFiles(trips, byTrip, cals);
-  const stops = await busStops(zip, files);
+  const stops = await busStops(zip, files, feed);
   return { routes, stops, files, trips: trips.size };
 }
 
@@ -391,7 +420,7 @@ async function buildBus() {
 const municipios = () => JSON.parse(readFileSync(`${ROOT}scripts/municipios.json`, 'utf8'));
 
 // One ArcGIS page: CODIGOESTACION (= GTFS stop_code) -> INE code (province + municipality).
-async function crtmPage(offset) {
+async function crtmPage(layer, offset) {
   const params = new URLSearchParams({
     where: '1=1',
     outFields: 'CODIGOESTACION,CODIGOMUNICIPIO,CODIGOPROVINCIA',
@@ -399,15 +428,17 @@ async function crtmPage(offset) {
     f: 'json',
     resultOffset: String(offset),
   });
-  const res = await fetch(`${CRTM_URL}?${params}`, { signal: AbortSignal.timeout(60_000) });
+  const res = await fetch(`${CRTM_LAYERS}/${layer}/FeatureServer/0/query?${params}`, {
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-async function crtmRecords() {
+async function crtmRecords(layer) {
   const records = [];
   for (let more = true; more;) {
-    const page = await crtmPage(records.length);
+    const page = await crtmPage(layer, records.length);
     const got = (page.features ?? []).map(f => f.attributes ?? {});
     records.push(...got);
     more = !!page.exceededTransferLimit && got.length > 0;
@@ -420,45 +451,45 @@ const ineOf = r =>
 console.assert(ineOf({ CODIGOPROVINCIA: 28, CODIGOMUNICIPIO: '106' }) === '28106', 'ineOf');
 console.assert(ineOf({ CODIGOPROVINCIA: '5', CODIGOMUNICIPIO: 7 }) === '05007', 'ineOf pads');
 
-const readCache = () => {
+const readCache = feed => {
   try {
-    const data = JSON.parse(readFileSync(TOWN_CACHE, 'utf8'));
+    const data = JSON.parse(readFileSync(feed.townCache, 'utf8'));
     return Array.isArray(data) ? data : null;
   } catch {
     return null;
   }
 };
-const cacheFresh = () =>
-  existsSync(TOWN_CACHE) && Date.now() - statSync(TOWN_CACHE).mtimeMs < TOWN_MAX_AGE_MS;
+const cacheFresh = feed =>
+  existsSync(feed.townCache) && Date.now() - statSync(feed.townCache).mtimeMs < TOWN_MAX_AGE_MS;
 
-async function fetchRecords() {
-  const records = await crtmRecords();
+async function fetchRecords(feed) {
+  const records = await crtmRecords(feed.layer);
   if (!records.length) throw new Error('no records');
-  await writeFile(TOWN_CACHE, JSON.stringify(records));
+  await writeFile(feed.townCache, JSON.stringify(records));
   return records;
 }
 
 // Cached for 7 days; a failed fetch falls back to any cache, else no towns (never fails).
-async function crtmData() {
+async function crtmData(feed) {
   mkdirSync(CACHE, { recursive: true });
-  const fresh = cacheFresh() ? readCache() : null;
+  const fresh = cacheFresh(feed) ? readCache(feed) : null;
   if (fresh) return fresh;
   try {
-    return await fetchRecords();
+    return await fetchRecords(feed);
   } catch (err) {
-    const old = readCache();
+    const old = readCache(feed);
     console.warn(
-      `CRTM town fetch failed (${err.message}): ${old ? 'using old cache' : 'no towns'}`,
+      `CRTM ${feed.layer} town fetch failed (${err.message}): ${old ? 'using old cache' : 'no towns'}`,
     );
     return old ?? [];
   }
 }
 
 // stop_code -> town name.
-async function townsByCode() {
+async function townsByCode(feed) {
   const names = municipios();
   const byCode = new Map();
-  for (const r of await crtmData()) {
+  for (const r of await crtmData(feed)) {
     const name = names[ineOf(r)];
     if (name && r.CODIGOESTACION != null) byCode.set(String(r.CODIGOESTACION).trim(), name);
   }
@@ -474,19 +505,37 @@ function nearestTown(s, withTown) {
   return near?.b.town ?? '';
 }
 
-// Bus stops get their town by code; Renfe stations (no code) the town of the nearest bus stop
-// within 1,500 m. Mutates the stops; returns how many of each got a town.
-function assignTowns(renfeStops, busStops, byCode) {
-  for (const s of busStops) s.town = byCode.get(s.code) ?? '';
+// CRTM stops (bus, light rail) get their town by code from their own layer: short codes collide
+// across feeds, so a code is only ever looked up in the layer of its feed. Returns the count.
+function assignCrtmTowns(stops, byCode) {
+  for (const s of stops) s.town = byCode.get(s.code) ?? '';
+  return stops.filter(s => s.town).length;
+}
+
+// Renfe stations (no code) get the town of the nearest bus stop within 1,500 m.
+function assignRenfeTowns(renfeStops, busStops) {
   const withTown = busStops.filter(s => s.town);
   for (const s of renfeStops) s.town = nearestTown(s, withTown);
-  return {
-    bus: withTown.length,
-    busAll: busStops.length,
-    renfe: renfeStops.filter(s => s.town).length,
-    renfeAll: renfeStops.length,
-  };
+  return renfeStops.filter(s => s.town).length;
 }
+
+async function assignTowns(renfeStops, bus, ml) {
+  const t = { bus: 0, ml: 0, renfe: 0 };
+  if (bus) t.bus = assignCrtmTowns(bus.stops, await townsByCode(BUS));
+  if (ml) t.ml = assignCrtmTowns(ml.stops, await townsByCode(ML));
+  t.renfe = assignRenfeTowns(renfeStops, bus?.stops ?? []);
+  return t;
+}
+console.assert(
+  (() => {
+    const bus = [{ code: '1' }];
+    const ml = [{ code: '1' }];
+    assignCrtmTowns(bus, new Map([['1', 'Madrid']]));
+    assignCrtmTowns(ml, new Map([['1', 'Parla']]));
+    return bus[0].town === 'Madrid' && ml[0].town === 'Parla';
+  })(),
+  'colliding stop codes keep the town of their own feed',
+);
 
 // Equirectangular approximation (same as src/gtfs.ts).
 const metres = (a, b) => {
@@ -510,14 +559,22 @@ async function writeJson(name, value) {
   return sizes(text);
 }
 
-async function writeStopFiles(stops, renfe, bus) {
+async function writeStopFiles(stops, renfe, crtm) {
   for (const s of stops) {
-    const file = bus?.files.get(s.id) ?? renfe.files.get(s.id) ?? renfe.empty;
+    const file =
+      crtm.find(f => f.files.has(s.id))?.files.get(s.id) ??
+      renfe.files.get(s.id) ??
+      renfe.empty;
     await writeFile(`${OUT}stop/${s.id}.json`, JSON.stringify(file));
   }
 }
 
-function report(renfe, bus, stops, sz) {
+const crtmLine = (name, f) =>
+  f
+    ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
+    : `${name}: skipped`;
+
+function report(renfe, bus, ml, stops, sz) {
   const files = readdirSync(`${OUT}stop`).map(f => [f, statSync(`${OUT}stop/${f}`).size]);
   const total = files.reduce((n, [, s]) => n + s, 0);
   const [bigName, bigSize] = files.reduce((a, b) => (b[1] > a[1] ? b : a));
@@ -526,11 +583,8 @@ function report(renfe, bus, stops, sz) {
   console.log(
     `renfe: routes ${Object.keys(renfe.routes).length}, trips ${renfe.trips}, stops ${renfe.stops.length}, days ${from}..${to}`,
   );
-  console.log(
-    bus
-      ? `bus: routes ${Object.keys(bus.routes).length}, trips ${bus.trips}, stops ${bus.stops.length}`
-      : 'bus: skipped',
-  );
+  console.log(crtmLine('bus', bus));
+  console.log(crtmLine('light rail', ml));
   console.log(
     `stops.json ${kb(sz.stops.raw)} raw, ${kb(sz.stops.gz)} gzip (${stops.length} stops)`,
   );
@@ -541,12 +595,13 @@ function report(renfe, bus, stops, sz) {
 
 async function main() {
   const renfe = await buildRenfe();
-  const bus = await buildBus();
-  const t = assignTowns(renfe.stops, bus?.stops ?? [], bus ? await townsByCode() : new Map());
+  const bus = await buildCrtm(BUS);
+  const ml = await buildCrtm(ML);
+  const t = await assignTowns(renfe.stops, bus, ml);
   console.log(
-    `towns: bus ${t.bus}/${t.busAll}, renfe ${t.renfe}/${t.renfeAll} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
+    `towns: bus ${t.bus}/${bus?.stops.length ?? 0}, light rail ${t.ml}/${ml?.stops.length ?? 0}, renfe ${t.renfe}/${renfe.stops.length} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
   );
-  const stops = [...renfe.stops, ...(bus?.stops ?? [])].sort((a, b) =>
+  const stops = [...renfe.stops, ...(bus?.stops ?? []), ...(ml?.stops ?? [])].sort((a, b) =>
     a.name.localeCompare(b.name, 'es'),
   );
 
@@ -555,10 +610,10 @@ async function main() {
   const sz = { stops: await writeJson('stops.json', stops) };
   // Renfe stops alone are small and always needed (destination names); stops.json is lazy.
   await writeJson('stops-renfe.json', renfe.stops);
-  await writeJson('routes.json', { ...renfe.routes, ...bus?.routes });
+  await writeJson('routes.json', { ...renfe.routes, ...bus?.routes, ...ml?.routes });
   await writeJson('days.json', renfe.days);
-  await writeStopFiles(stops, renfe, bus);
-  report(renfe, bus, stops, sz);
+  await writeStopFiles(stops, renfe, [bus, ml].filter(Boolean));
+  report(renfe, bus, ml, stops, sz);
 }
 
 await main();

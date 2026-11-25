@@ -26,8 +26,9 @@ export default function Settings() {
         Horarios de Cercanías Madrid y retrasos en tiempo real, con datos abiertos de Renfe
         (GTFS y GTFS-Realtime, data.renfe.com). Horarios de autobuses interurbanos (sin datos en
         vivo) del Consorcio Regional de Transportes de Madrid a través del Punto de Acceso
-        Nacional. Municipios de las paradas: datos abiertos del CRTM (datos.crtm.es).
-        Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons (MIT).
+        Nacional. Metro Ligero y Tranvía de Parla: datos abiertos del CRTM (sin datos en vivo).
+        Municipios de las paradas: datos abiertos del CRTM (datos.crtm.es). Tipografía: Selawik
+        (SIL OFL). Iconos: Fluent UI System Icons (MIT).
       </p>
       <p className="about">
         Powered by{' '}

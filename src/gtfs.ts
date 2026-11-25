@@ -1,19 +1,26 @@
 // Shared logic: Madrid time, departures from the local timetable, GTFS-RT merging, alerts, stop search.
 import { loadJson, saveJson } from './storage.ts';
 
-// k: 'r' Renfe station, 'b' bus stop (with its code and street, to tell the two sides of a road apart).
+// k: 'r' Renfe station, 'b' bus stop, 't' light rail / tram stop (both with its code and street, to tell the two sides of a road apart).
 export type Stop = {
   id: string;
   name: string;
   lat: number;
   lon: number;
   wa: boolean;
-  k?: 'r' | 'b';
+  k?: 'r' | 'b' | 't';
   code?: string;
   desc?: string;
   town?: string; // municipality (CRTM open data), empty when unknown
 };
-export type RouteInfo = { line: string; color: string; text: string; name?: string };
+// tram: Metro Ligero / Tranvía de Parla route (timetable only, same stop-file shape as buses).
+export type RouteInfo = {
+  line: string;
+  color: string;
+  text: string;
+  name?: string;
+  tram?: boolean;
+};
 export type RouteMap = Record<string, RouteInfo>;
 export type DaysFile = { from: string; to: string; days: Record<string, string[]> };
 // Per-stop timetable file: route ids (r), destination stop ids (d) and, per service id, rows of
@@ -45,7 +52,8 @@ export type Departure = {
   color: string;
   text: string;
   dest: string; // Renfe: destination stop id; bus: headsign
-  bus?: boolean;
+  bus?: boolean; // timetable-only stop file (buses and light rail)
+  tram?: boolean;
   planned: Date;
   expected: Date;
   cancelled: boolean;
@@ -234,6 +242,7 @@ function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Depart
       text: r.text,
       dest: file.h[hsi],
       bus: true,
+      tram: r.tram,
       planned,
       expected: planned,
       cancelled: false,
@@ -287,6 +296,28 @@ console.assert(
     return sunOk && removedOk && lateOk && addedOk;
   })(),
   'busScheduled: Sunday-only, removed date, 24:02 after midnight, added date',
+);
+
+// Light-rail routes use the bus stop-file shape: timetable only, flagged as trams for the label.
+console.assert(
+  (() => {
+    const routes: RouteMap = { M: { line: 'ML4', color: '#7DB713', text: '#fff', tram: true } };
+    const file: BusFile = {
+      kind: 'bus',
+      r: ['M'],
+      h: ['X'],
+      c: [[127, 20261101, 20271231, [], []]],
+      d: [[8 * 3600, 0, 0, 0]],
+    };
+    const [d] = scheduled(
+      file,
+      { from: '', to: '', days: {} },
+      routes,
+      new Date('2026-11-25T06:50:00Z'),
+    );
+    return !!d && d.bus === true && d.tram === true;
+  })(),
+  'k t stops go through the timetable-only path and keep the tram flag',
 );
 
 // Trip-level delay (seconds) and cancellation from GTFS-RT; the feed covers all of Spain.
