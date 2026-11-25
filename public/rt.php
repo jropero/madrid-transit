@@ -70,22 +70,40 @@ function emt_write(string $path, string $data, int $mode): void {
     }
 }
 
-// A header value must be printable ASCII (no CR/LF), so it cannot inject headers.
+// A header value must be printable ASCII (space included, for passwords) with no CR/LF,
+// control or non-ASCII characters, so it cannot inject headers.
 function emt_clean($v): bool {
-    return is_string($v) && preg_match('/^[\x21-\x7e]{1,2048}\z/', $v) === 1;
+    return is_string($v) && preg_match('/^[\x20-\x7e]{1,2048}\z/', $v) === 1;
 }
 
-// {"clientId":…,"passKey":…} from the config file outside the webroot.
+// {"email":…,"password":…} and/or {"clientId":…,"passKey":…} from the config file outside the
+// webroot. Only complete, valid pairs are returned; a present but invalid pair (for example a
+// non-ASCII password) with no valid one is 'emt config invalid'.
 function emt_config(): array {
     $raw = @file_get_contents(__DIR__ . '/../../emt.json');
     $cfg = is_string($raw) ? json_decode($raw, true) : null;
     if (!is_array($cfg)) {
         fail(503, 'emt not configured');
     }
-    if (!emt_clean($cfg['clientId'] ?? null) || !emt_clean($cfg['passKey'] ?? null)) {
-        fail(503, 'emt not configured');
+    $out = [];
+    $invalid = false;
+    foreach ([['email', 'password'], ['clientId', 'passKey']] as [$a, $b]) {
+        $x = $cfg[$a] ?? null;
+        $y = $cfg[$b] ?? null;
+        if ($x === null && $y === null) {
+            continue;
+        }
+        if (emt_clean($x) && emt_clean($y)) {
+            $out[$a] = $x;
+            $out[$b] = $y;
+        } else {
+            $invalid = true;
+        }
     }
-    return $cfg;
+    if ($out === []) {
+        fail(503, $invalid ? 'emt config invalid' : 'emt not configured');
+    }
+    return $out;
 }
 
 // Seconds-to-live of a fresh login: tokenSecExpiration (the API extends it on each call).
@@ -96,16 +114,23 @@ function emt_ttl(array $d): int {
     return 3600; // absent: documented sessions last far longer
 }
 
-// Logs in and caches the token (file mode 600 in the temp dir); null on failure.
+// Logs in and caches the token (file mode 600 in the temp dir); null on failure. Prefers
+// email/password headers, else X-ClientId/passKey (legacy). Wrong user or password ("92"/"89")
+// ends the request with 502 instead of retrying.
 function emt_login(array $cfg, string $tokenFile): ?string {
-    [$status, $body] = emt_http('GET', EMT_HOST . 'v1/mobilitylabs/user/login/', [
-        'X-ClientId: ' . $cfg['clientId'],
-        'passKey: ' . $cfg['passKey'],
-        'Accept: application/json',
-    ]);
+    if (isset($cfg['email'], $cfg['password'])) {
+        $auth = ['email: ' . $cfg['email'], 'password: ' . $cfg['password']];
+    } else {
+        $auth = ['X-ClientId: ' . $cfg['clientId'], 'passKey: ' . $cfg['passKey']];
+    }
+    [$status, $body] = emt_http('GET', EMT_HOST . 'v1/mobilitylabs/user/login/', array_merge($auth, ['Accept: application/json']));
     $j = $body !== null ? json_decode($body, true) : null;
+    $code = is_array($j) ? ($j['code'] ?? '') : '';
+    if (in_array($code, ['92', '89'], true)) {
+        fail(502, 'emt login failed');
+    }
     $d = $j['data'][0] ?? null;
-    if ($status !== 200 || !in_array($j['code'] ?? '', ['00', '01'], true) || !is_array($d) || !emt_clean($d['accessToken'] ?? null)) {
+    if ($status !== 200 || !in_array($code, ['00', '01'], true) || !is_array($d) || !emt_clean($d['accessToken'] ?? null)) {
         return null;
     }
     $exp = time() + emt_ttl($d);

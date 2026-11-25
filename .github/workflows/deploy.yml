@@ -54,6 +54,8 @@ jobs:
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
           EMT_CLIENT_ID: ${{ secrets.EMT_CLIENT_ID }}
           EMT_PASS_KEY: ${{ secrets.EMT_PASS_KEY }}
+          EMT_EMAIL: ${{ secrets.EMT_EMAIL }}
+          EMT_PASSWORD: ${{ secrets.EMT_PASSWORD }}
         run: |
           set -euo pipefail
           # rsync --delete empties the target: refuse anything that is not the /m folder.
@@ -90,14 +92,19 @@ jobs:
             dist/ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
           # EMT credentials for rt.php: a file outside the web root ($DEPLOY_PATH is
           # .../public_html/m, so ../../emt.json is next to public_html). Never echoed.
-          if [ -n "${EMT_CLIENT_ID:-}" ] && [ -n "${EMT_PASS_KEY:-}" ]; then
-            emt="$(mktemp)"
-            jq -n --arg c "$EMT_CLIENT_ID" --arg p "$EMT_PASS_KEY" '{clientId: $c, passKey: $p}' > "$emt"
-            chmod 600 "$emt"
+          # Include only complete pairs: email/password (works) and/or clientId/passKey (legacy).
+          emt="$(mktemp)"
+          jq -n \
+            --arg e "${EMT_EMAIL:-}" --arg w "${EMT_PASSWORD:-}" \
+            --arg c "${EMT_CLIENT_ID:-}" --arg p "${EMT_PASS_KEY:-}" '
+            (if $e != "" and $w != "" then {email: $e, password: $w} else {} end)
+            + (if $c != "" and $p != "" then {clientId: $c, passKey: $p} else {} end)' > "$emt"
+          chmod 600 "$emt"
+          if [ "$(jq 'length' "$emt")" -gt 0 ]; then
             rsync -a --chmod=F600 \
               -e "ssh -i $HOME/.ssh/deploy -p $SSH_PORT -o IdentitiesOnly=yes" \
               "$emt" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/../../emt.json"
-            rm -f "$emt"
           else
-            echo "::notice::EMT_CLIENT_ID or EMT_PASS_KEY is empty: emt.json not uploaded"
+            echo "::notice::No complete EMT_EMAIL/EMT_PASSWORD or EMT_CLIENT_ID/EMT_PASS_KEY pair: emt.json not uploaded"
           fi
+          rm -f "$emt"
