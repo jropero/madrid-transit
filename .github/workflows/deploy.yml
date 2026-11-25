@@ -52,6 +52,8 @@ jobs:
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_HOST_FP: ${{ vars.SSH_HOST_FP }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          EMT_CLIENT_ID: ${{ secrets.EMT_CLIENT_ID }}
+          EMT_PASS_KEY: ${{ secrets.EMT_PASS_KEY }}
         run: |
           set -euo pipefail
           # rsync --delete empties the target: refuse anything that is not the /m folder.
@@ -86,3 +88,16 @@ jobs:
           rsync -az --delete --delay-updates \
             -e "ssh -i $HOME/.ssh/deploy -p $SSH_PORT -o IdentitiesOnly=yes" \
             dist/ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+          # EMT credentials for rt.php: a file outside the web root ($DEPLOY_PATH is
+          # .../public_html/m, so ../../emt.json is next to public_html). Never echoed.
+          if [ -n "${EMT_CLIENT_ID:-}" ] && [ -n "${EMT_PASS_KEY:-}" ]; then
+            emt="$(mktemp)"
+            jq -n --arg c "$EMT_CLIENT_ID" --arg p "$EMT_PASS_KEY" '{clientId: $c, passKey: $p}' > "$emt"
+            chmod 600 "$emt"
+            rsync -a --chmod=F600 \
+              -e "ssh -i $HOME/.ssh/deploy -p $SSH_PORT -o IdentitiesOnly=yes" \
+              "$emt" "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/../../emt.json"
+            rm -f "$emt"
+          else
+            echo "::notice::EMT_CLIENT_ID or EMT_PASS_KEY is empty: emt.json not uploaded"
+          fi

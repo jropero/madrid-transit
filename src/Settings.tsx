@@ -27,9 +27,9 @@ export default function Settings() {
         (GTFS y GTFS-Realtime, data.renfe.com). Horarios de autobuses interurbanos del Consorcio
         Regional de Transportes de Madrid a través del Punto de Acceso Nacional. Metro Ligero y
         Tranvía de Parla: datos abiertos del CRTM. Tiempos de paso de autobuses y tranvías: CRTM
-        (crtm.es), con el horario como respaldo. Municipios de las paradas: datos abiertos del
-        CRTM (datos.crtm.es). Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons
-        (MIT).
+        (crtm.es), con el horario como respaldo. Autobuses EMT: EMT Madrid MobilityLabs (datos
+        en vivo). Municipios de las paradas: datos abiertos del CRTM (datos.crtm.es).
+        Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons (MIT).
       </p>
       <p className="about">
         Powered by{' '}

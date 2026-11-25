@@ -51,3 +51,7 @@ One-time setup:
 ## Not built
 
 - EMT city buses via MobilityLabs: log in with X-ClientId + passKey inside `rt.php` (`?f=emt&stop=…`). Keep the credentials in a config file outside the webroot, never in the bundle or repo.
+
+## EMT city buses
+
+Live arrivals come from EMT Madrid MobilityLabs through `public/rt.php?f=emt&stop=<n>`. Credentials stay server-side: set the GitHub secrets `EMT_CLIENT_ID` and `EMT_PASS_KEY`; the deploy workflow writes `emt.json` to `$DEPLOY_PATH/../../emt.json` (outside `public_html`, mode 600). Without them the step is skipped and EMT stops fall back to CRTM times. `vp dev` forwards `f=emt` requests to the deployed `rt.php`. Mind the API quota (arrivals are cached 30 s per stop). Stops and lines: CRTM "GTFS Red de EMT" (ArcGIS item `868df0e58fca47e79b942902dffd7da0`). Data provided by EMT Madrid MobilityLabs.

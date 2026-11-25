@@ -1,14 +1,14 @@
 // Shared logic: Madrid time, departures from the local timetable, GTFS-RT merging, alerts, stop search.
 import { loadJson, saveJson } from './storage.ts';
 
-// k: 'r' Renfe station, 'b' bus stop, 't' light rail / tram stop (both with its code and street, to tell the two sides of a road apart).
+// k: 'r' Renfe station, 'b' bus stop, 't' light rail / tram stop (both with its code and street, to tell the two sides of a road apart), 'e' EMT city bus stop (live only, code = stop number).
 export type Stop = {
   id: string;
   name: string;
   lat: number;
   lon: number;
   wa: boolean;
-  k?: 'r' | 'b' | 't';
+  k?: 'r' | 'b' | 't' | 'e';
   code?: string;
   desc?: string;
   town?: string; // municipality (CRTM open data), empty when unknown
@@ -54,6 +54,7 @@ export type Departure = {
   dest: string; // Renfe: destination stop id; bus: headsign
   bus?: boolean; // timetable-only stop file (buses and light rail)
   tram?: boolean;
+  emt?: boolean; // EMT city bus (live arrivals only)
   planned: Date;
   expected: Date;
   cancelled: boolean;
@@ -546,6 +547,91 @@ console.assert(
   'mergeCrtm: CRTM lines replace the timetable, other lines keep it',
 );
 
+// EMT MobilityLabs arrivals (via rt.php): code "00", rows at data[0].Arrive. estimateArrive is
+// seconds (string or number); 999999 means no estimate (more than 45 min).
+export type EmtJson = {
+  code?: string;
+  data?: {
+    Arrive?: { line?: string; destination?: string; estimateArrive?: string | number }[];
+  }[];
+};
+export type EmtRow = { when: Date; routeId: string; line: string; dest: string };
+const NO_ESTIMATE = 999_999;
+
+// Live rows in time order; entries without a line or a usable estimate are dropped.
+export function parseEmt(json: EmtJson | null, now: Date): EmtRow[] {
+  const arrive = json?.code === '00' ? json.data?.[0]?.Arrive : null;
+  if (!Array.isArray(arrive)) return [];
+  return arrive
+    .map(a => ({
+      line: a?.line?.trim() ?? '',
+      dest: a?.destination?.trim() ?? '',
+      s: Number(a?.estimateArrive),
+    }))
+    .filter(a => a.line && Number.isFinite(a.s) && a.s >= 0 && a.s < NO_ESTIMATE)
+    .map(a => ({
+      when: new Date(now.getTime() + a.s * 1000),
+      routeId: `emt_${a.line}`,
+      line: a.line,
+      dest: a.dest,
+    }))
+    .sort((a, b) => a.when.getTime() - b.when.getTime());
+}
+
+// EMT rows as departures (tile colour from routes.json).
+export const emtDepartures = (rows: EmtRow[], routes: RouteMap): Departure[] =>
+  rows.map((r, i) => ({
+    tripId: `emt-${r.routeId}-${i}`,
+    routeId: r.routeId,
+    line: r.line,
+    color: routes[r.routeId]?.color ?? '#0178BC',
+    text: routes[r.routeId]?.text ?? '#ffffff',
+    dest: r.dest,
+    bus: true,
+    emt: true,
+    planned: r.when,
+    expected: r.when,
+    cancelled: false,
+    live: true,
+  }));
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T09:00:00Z');
+    const a = (line: string, destination: string, estimateArrive: string | number) => ({
+      line,
+      destination,
+      estimateArrive,
+    });
+    const rows = parseEmt(
+      {
+        code: '00',
+        data: [
+          {
+            Arrive: [
+              a('27', 'PLAZA', '300'),
+              a('', 'X', 60),
+              a('5', 'Y', 999999),
+              a('1', 'Z', 'x'),
+            ],
+          },
+        ],
+      },
+      now,
+    );
+    return (
+      rows.length === 1 &&
+      rows[0].routeId === 'emt_27' &&
+      rows[0].when.toISOString() === '2026-11-25T09:05:00.000Z' &&
+      parseEmt({ code: '00', data: [{}] }, now).length === 0 &&
+      parseEmt({ code: '80' }, now).length === 0 &&
+      parseEmt(null, now).length === 0 &&
+      parseEmt({ code: '00', data: [{ Arrive: 'x' as never }] }, now).length === 0 &&
+      emtDepartures(rows, {})[0].live
+    );
+  })(),
+  'parseEmt: normal, no line, no estimate, malformed, empty and error responses',
+);
+
 // Departures still worth showing: not yet gone (30 s grace), within the horizon by plan.
 export const upcoming = (deps: Departure[], now: number) =>
   deps.filter(d => d.expected.getTime() >= now - 30_000);
@@ -632,7 +718,7 @@ const inTown = (stops: Stop[], town: string): Stop[] => {
   return exact.length ? exact : stops.filter(s => fold(s.town ?? '').includes(t));
 };
 
-const MODE_ORDER = 'rtb';
+const MODE_ORDER = 'rtbe';
 const modeIndex = (s: Stop) => {
   const i = MODE_ORDER.indexOf(s.k ?? 'b');
   return i < 0 ? MODE_ORDER.length : i;

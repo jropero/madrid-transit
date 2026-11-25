@@ -4,6 +4,7 @@ import type {
   AlertFeed,
   CrtmJson,
   DaysFile,
+  EmtJson,
   StopFile,
   RouteMap,
   Stop,
@@ -109,6 +110,23 @@ export const fetchCrtm = (stopId: string) => {
   p.then(
     f => f.offlineSince && crtmMemo.delete(code),
     () => crtmMemo.delete(code),
+  );
+  return p;
+};
+
+// EMT arrivals (`emt_72` -> stop 72) through rt.php, which caches 30 s; same memo here. The last
+// copy per stop is kept for offline (evictable cache entries).
+const EMT_MEMO_MS = 30_000;
+const emtMemo = new Map<string, { at: number; p: Promise<Feed<EmtJson>> }>();
+export const fetchEmt = (stopId: string) => {
+  const n = stopId.replace(/^emt_/, '');
+  const hit = emtMemo.get(n);
+  if (hit && Date.now() - hit.at < EMT_MEMO_MS) return hit.p;
+  const p = fetchFeed<EmtJson>(`emt:${n}`, `f=emt&stop=${encodeURIComponent(n)}`, f => f);
+  emtMemo.set(n, { at: Date.now(), p });
+  p.then(
+    f => f.offlineSince && emtMemo.delete(n),
+    () => emtMemo.delete(n),
   );
   return p;
 };

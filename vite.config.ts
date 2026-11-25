@@ -7,12 +7,25 @@ const crtmStop = (path: string) => {
   return /^(8|10)_\d{1,6}$/.test(stop) ? stop : '';
 };
 
+// The validated `stop` of a /m/rt.php?f=emt request (same pattern as rt.php), else ''.
+const emtStop = (path: string) => {
+  const stop = new URL(path, 'http://x').searchParams.get('stop') ?? '';
+  return /^\d{1,6}$/.test(stop) ? stop : '';
+};
+
 export default defineConfig({
   // Absolute base: relative paths break PWA manifest scope/icon resolution under /m/.
   base: '/m/',
   plugins: [react()],
   server: {
     proxy: {
+      // EMT needs credentials that only exist on the server: dev forwards to the deployed rt.php.
+      '^/m/rt\\.php\\?f=emt(&|$)': {
+        target: 'https://ekult.co.uk',
+        changeOrigin: true,
+        bypass: req => (emtStop(req.url ?? '') ? undefined : false),
+        rewrite: path => `/m/rt.php?f=emt&stop=${emtStop(path)}`,
+      },
       // Dev stand-in for public/rt.php (crtm feed): same URL as production, straight to CRTM.
       // Listed first so it wins; an invalid stop never leaves the dev server (bypass answers 404).
       '^/m/rt\\.php\\?f=crtm(&|$)': {

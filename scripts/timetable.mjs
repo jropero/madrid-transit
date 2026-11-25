@@ -57,6 +57,16 @@ const ML = {
   townCache: `${CACHE}crtm-m10.json`,
 };
 
+// EMT city buses: public ArcGIS item (CRTM "GTFS Red de EMT", no key, 21 MB). Frequency-based
+// trips, so only routes.txt and stops.txt are read: live arrivals come from rt.php (?f=emt).
+const EMT = {
+  key: 'emt',
+  label: 'EMT',
+  color: '0178BC',
+  url: 'https://www.arcgis.com/sharing/rest/content/items/868df0e58fca47e79b942902dffd7da0/data',
+  zip: `${CACHE}emt.zip`,
+};
+
 // Minimal CSV line split with quote support; every field is trimmed (GTFS here is space-padded).
 export function splitCsv(line) {
   const out = [];
@@ -416,6 +426,57 @@ async function buildCrtm(feed) {
   return { routes, stops, files, trips: trips.size };
 }
 
+// ---------------------------------------------------------------- EMT city buses
+
+// Routes keyed `emt_<short name>` (what the client builds from the live `line`).
+async function emtRoutes(zip) {
+  const routes = {};
+  for await (const r of rows(zip, 'routes.txt')) {
+    if (!r.route_short_name) continue;
+    routes[`emt_${r.route_short_name}`] = {
+      line: r.route_short_name,
+      color: `#${r.route_color || EMT.color}`,
+      text: `#${r.route_text_color || 'FFFFFF'}`,
+      name: r.route_long_name,
+    };
+  }
+  return routes;
+}
+
+// stop_id is the EMT stop number (digits only; anything else is dropped).
+async function emtStops(zip) {
+  const stops = [];
+  for await (const s of rows(zip, 'stops.txt')) {
+    if (!/^\d{1,6}$/.test(s.stop_id) || !s.stop_name) continue;
+    stops.push({
+      id: `emt_${s.stop_id}`,
+      name: s.stop_name,
+      lat: coord(s.stop_lat),
+      lon: coord(s.stop_lon),
+      wa: false,
+      k: 'e',
+      code: s.stop_id,
+      town: 'Madrid',
+    });
+  }
+  return stops;
+}
+
+// Never fails the build: a missing or broken EMT feed only drops EMT stops.
+async function buildEmt() {
+  try {
+    if (!(await ensureFeed({ ...EMT, auth: false }))) return null;
+    const zip = EMT.zip;
+    const routes = await emtRoutes(zip);
+    const stops = await emtStops(zip);
+    if (!stops.length) throw new Error('no stops');
+    return { routes, stops };
+  } catch (err) {
+    console.warn(`EMT step failed (${err.message}): skipping`);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------- Towns (CRTM open data)
 
 // Town names by INE code (Wikidata, committed). Untrusted-looking data is only ever parsed.
@@ -563,6 +624,7 @@ async function writeJson(name, value) {
 
 async function writeStopFiles(stops, renfe, crtm) {
   for (const s of stops) {
+    if (s.k === 'e') continue; // EMT stops have no timetable file (live only)
     const file =
       crtm.find(f => f.files.has(s.id))?.files.get(s.id) ??
       renfe.files.get(s.id) ??
@@ -576,7 +638,7 @@ const crtmLine = (name, f) =>
     ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
     : `${name}: skipped`;
 
-function report(renfe, bus, ml, stops, sz) {
+function report(renfe, bus, ml, emt, stops, sz) {
   const files = readdirSync(`${OUT}stop`).map(f => [f, statSync(`${OUT}stop/${f}`).size]);
   const total = files.reduce((n, [, s]) => n + s, 0);
   const [bigName, bigSize] = files.reduce((a, b) => (b[1] > a[1] ? b : a));
@@ -587,6 +649,11 @@ function report(renfe, bus, ml, stops, sz) {
   );
   console.log(crtmLine('bus', bus));
   console.log(crtmLine('light rail', ml));
+  console.log(
+    emt
+      ? `EMT: routes ${Object.keys(emt.routes).length}, stops ${emt.stops.length}`
+      : 'EMT: skipped',
+  );
   console.log(
     `stops.json ${kb(sz.stops.raw)} raw, ${kb(sz.stops.gz)} gzip (${stops.length} stops)`,
   );
@@ -599,23 +666,32 @@ async function main() {
   const renfe = await buildRenfe();
   const bus = await buildCrtm(BUS);
   const ml = await buildCrtm(ML);
+  const emt = await buildEmt();
   const t = await assignTowns(renfe.stops, bus, ml);
   console.log(
     `towns: bus ${t.bus}/${bus?.stops.length ?? 0}, light rail ${t.ml}/${ml?.stops.length ?? 0}, renfe ${t.renfe}/${renfe.stops.length} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
   );
-  const stops = [...renfe.stops, ...(bus?.stops ?? []), ...(ml?.stops ?? [])].sort((a, b) =>
-    a.name.localeCompare(b.name, 'es'),
-  );
+  const stops = [
+    ...renfe.stops,
+    ...(bus?.stops ?? []),
+    ...(ml?.stops ?? []),
+    ...(emt?.stops ?? []),
+  ].sort((a, b) => a.name.localeCompare(b.name, 'es'));
 
   rmSync(OUT, { recursive: true, force: true });
   mkdirSync(`${OUT}stop`, { recursive: true });
   const sz = { stops: await writeJson('stops.json', stops) };
   // Renfe stops alone are small and always needed (destination names); stops.json is lazy.
   await writeJson('stops-renfe.json', renfe.stops);
-  await writeJson('routes.json', { ...renfe.routes, ...bus?.routes, ...ml?.routes });
+  await writeJson('routes.json', {
+    ...renfe.routes,
+    ...bus?.routes,
+    ...ml?.routes,
+    ...emt?.routes,
+  });
   await writeJson('days.json', renfe.days);
   await writeStopFiles(stops, renfe, [bus, ml].filter(Boolean));
-  report(renfe, bus, ml, stops, sz);
+  report(renfe, bus, ml, emt, stops, sz);
 }
 
 await main();

@@ -41,3 +41,8 @@ Madrid Cercanías (Renfe), CRTM interurban bus and light rail (Metro Ligero ML1-
 - Wrap localStorage access in try/catch (use `loadJson` / `saveJson`). Keys are prefixed `madrid-transit:`.
 - New parsing or maths logic gets an inline `console.assert` self-check.
 - Interactive elements are real `<button>`s with `aria-*` state. Don't put `<div>`s inside buttons; use `<span>`.
+
+## EMT city buses
+
+- Stops/routes: CRTM ArcGIS item `868df0e58fca47e79b942902dffd7da0` ("GTFS Red de EMT", 21 MB, `.cache/emt.zip`, 24 h). Only `routes.txt` and `stops.txt` are streamed. `stops.json` gets `id: emt_<n>`, `k: 'e'`, `code` = stop number, `town: 'Madrid'`; `routes.json` keys `emt_<short>`. No per-stop timetable files (frequency-based trips).
+- Live: `rt.php?f=emt&stop=<digits 1-6>` logs in to MobilityLabs (X-ClientId + passKey from `../../emt.json`, outside the webroot, written by the deploy workflow from secrets `EMT_CLIENT_ID` / `EMT_PASS_KEY`), caches the token (mode 600, temp dir) and arrivals (30 s). Client: `fetchEmt`, `parseEmt` (`src/gtfs.ts`); fallback is CRTM `6_<n>`. Dev proxies `f=emt` to the deployed `https://ekult.co.uk/m/rt.php`.

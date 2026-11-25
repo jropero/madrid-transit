@@ -6,6 +6,7 @@ import Alerts, { AccessMark, AlertMark } from './Alerts.tsx';
 import {
   fetchAlerts,
   fetchCrtm,
+  fetchEmt,
   fetchTripUpdates,
   isOffline,
   loadAllStops,
@@ -16,6 +17,7 @@ import {
 import {
   applyRealtime,
   daysUntil,
+  emtDepartures,
   ddmm,
   hhmm,
   isBus,
@@ -26,6 +28,7 @@ import {
   nearStops,
   parseAlerts,
   parseCrtm,
+  parseEmt,
   saveSaved,
   scheduled,
   searchStops,
@@ -33,6 +36,7 @@ import {
   upcoming,
   type Alert,
   type CrtmRow,
+  type EmtRow,
   type StopFile,
   type Departure,
   type NearStop,
@@ -58,12 +62,15 @@ function useTimetable() {
   return { tt, error };
 }
 
-// The selected stop's scheduled departures (a local file).
+// The selected stop's scheduled departures (a local file; none for EMT stops).
+const isEmtId = (id: string) => id.startsWith('emt_');
+
 function useStopDeps(id: string) {
   const [deps, setDeps] = useState<{ id: string; list: StopFile } | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
     setError('');
+    if (isEmtId(id)) return; // EMT stops have no timetable file (live only)
     loadStopDeps(id).then(
       list => setDeps({ id, list }),
       err => setError(String(err)),
@@ -178,6 +185,72 @@ function useCrtm(stopId: string, active: boolean) {
   };
 }
 
+type EmtLoad = { rows: EmtRow[]; status: string };
+
+const liveStatus = (label: string, offline: Date | null) =>
+  offline
+    ? `sin conexión · ${label} ${hhmm(offline)}`
+    : `en vivo · ${label} ${hhmm(new Date())}`;
+
+async function tryEmt(stopId: string): Promise<EmtLoad | null> {
+  try {
+    const feed = await fetchEmt(stopId);
+    const rows = parseEmt(feed.data, new Date());
+    return rows.length ? { rows, status: liveStatus('EMT', feed.offlineSince) } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fallback: CRTM's own stop times for the same stop number (`6_<n>`), thinner coverage.
+async function tryCrtm(stopId: string): Promise<EmtLoad | null> {
+  try {
+    const feed = await fetchCrtm(`6_${stopId.replace(/^emt_/, '')}`);
+    const rows = parseCrtm(feed.data, new Date());
+    return rows.length ? { rows, status: liveStatus('CRTM', feed.offlineSince) } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadEmtRows(stopId: string): Promise<EmtLoad> {
+  return (
+    (await tryEmt(stopId)) ??
+    (await tryCrtm(stopId)) ?? { rows: [], status: 'sin datos en vivo' }
+  );
+}
+
+// EMT stop arrivals, every 30 s while `active` (rt.php caches 30 s).
+function useEmt(stopId: string, active: boolean) {
+  const [got, setGot] = useState<({ id: string } & EmtLoad) | null>(null);
+  const [status, setStatus] = useState('Cargando…');
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const res = await loadEmtRows(stopId);
+    setGot({ id: stopId, ...res });
+    setStatus(res.status);
+    setLoading(false);
+    setLoadedAt(Date.now());
+  }, [stopId]);
+
+  useEffect(() => {
+    if (active) void load();
+  }, [active, load]);
+  usePolling(active, loadedAt, load, setLoadedAt, REFRESH_MS);
+
+  return {
+    rows: got?.id === stopId ? got.rows : null,
+    status,
+    setStatus,
+    loadedAt,
+    loading,
+    load,
+  };
+}
+
 const groupKey = (d: Departure) => `${d.line}|${d.dest}`;
 
 // Lines by next departure; each group keeps its own departures in time order.
@@ -211,6 +284,7 @@ const MAX_PER_GROUP = 4;
 
 // Tile caption: timetable-only departures are 'tranvía' (light rail) or 'bus'.
 const modeLabel = (d: Departure) => {
+  if (d.emt) return 'emt';
   if (d.tram) return 'tranvía';
   return d.bus ? 'bus' : 'cercanías';
 };
@@ -248,7 +322,7 @@ function LineGroup({
   );
 }
 
-const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía' };
+const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía', e: 'emt' };
 
 // "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains and trams in bold.
 function StopCaption({ s }: { s: Stop }) {
@@ -257,7 +331,7 @@ function StopCaption({ s }: { s: Stop }) {
   return (
     <>
       {s.town ? `${s.town} · ` : ''}
-      {s.k === 'b' ? mode : <b>{mode}</b>}
+      {s.k === 'b' || s.k === 'e' ? mode : <b>{mode}</b>}
       {rest.length ? ` · ${rest.join(' · ')}` : ''}
     </>
   );
@@ -377,25 +451,46 @@ function statusLine(parts: string[]) {
   return parts.filter(Boolean).join(' · ');
 }
 
-function useDepartureList(
-  tt: Timetable | null,
-  list: StopFile | null,
-  trips: TripUpdates | null,
-  crtm: CrtmRow[] | null,
-) {
+type Sources = {
+  list: StopFile | null;
+  trips: TripUpdates | null;
+  crtm: CrtmRow[] | null;
+  emt: EmtRow[] | null;
+};
+
+function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
+  if (src.emt) return emtDepartures(src.emt, tt.routes);
+  if (!src.list) return [];
+  const planned = scheduled(src.list, tt.days, tt.routes, at);
+  // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
+  return isBus(src.list)
+    ? mergeCrtm(planned, src.crtm, tt.routes, at)
+    : applyRealtime(planned, src.trips);
+}
+
+function useDepartureList(tt: Timetable | null, src: Sources) {
   const now = useNow();
-  const deps = useMemo(() => {
-    if (!tt || !list) return [];
-    const at = new Date(now);
-    const planned = scheduled(list, tt.days, tt.routes, at);
-    // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
-    const merged = isBus(list)
-      ? mergeCrtm(planned, crtm, tt.routes, at)
-      : applyRealtime(planned, trips);
-    return upcoming(merged, now);
-  }, [tt, list, trips, crtm, now]);
+  const { list, trips, crtm, emt } = src;
+  const deps = useMemo(
+    () =>
+      tt ? upcoming(departuresAt(tt, { list, trips, crtm, emt }, new Date(now)), now) : [],
+    [tt, list, trips, crtm, emt, now],
+  );
   return { deps, now };
 }
+
+const pickFeed = <A, B, C>(isEmt: boolean, bus: boolean, f: { renfe: A; crtm: B; emt: C }) => {
+  if (isEmt) return f.emt;
+  return bus ? f.crtm : f.renfe;
+};
+
+// Only Renfe stops have alerts.
+const alertsOf = (renfeStop: boolean, alerts: Alert[]) => (renfeStop ? alerts : []);
+const refreshMs = (bus: boolean, isEmt: boolean) =>
+  bus && !isEmt ? CRTM_REFRESH_MS : REFRESH_MS;
+
+// Timetable file loaded (Renfe, bus) or EMT answer in (EMT stops have no file).
+const hasStopData = (list: StopFile | null, emtRows: EmtRow[] | null) => !!list || !!emtRows;
 
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
@@ -427,10 +522,19 @@ function Departures({
   const { tt, error } = useTimetable();
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
   const bus = isBus(stopDeps);
-  const renfe = useRealtime(active && !bus);
+  const isEmt = isEmtId(selected.id);
+  const renfe = useRealtime(active && !bus && !isEmt);
   const crtm = useCrtm(selected.id, active && bus);
-  const rt = bus ? crtm : renfe;
-  const { deps, now } = useDepartureList(tt, stopDeps, renfe.trips, crtm.rows);
+  const emt = useEmt(selected.id, active && isEmt);
+  const rt = pickFeed(isEmt, bus, { renfe, crtm, emt });
+  const { deps, now } = useDepartureList(tt, {
+    list: stopDeps,
+    trips: renfe.trips,
+    crtm: crtm.rows,
+    emt: emt.rows,
+  });
+  const renfeStop = !bus && !isEmt;
+  const alerts = alertsOf(renfeStop, renfe.alerts);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const wa = stopById.get(selected.id)?.wa ?? false;
@@ -465,15 +569,11 @@ function Departures({
     }
   }
 
-  const empty = tt && stopDeps && groups.length === 0;
+  const empty = tt && hasStopData(stopDeps, emt.rows) && groups.length === 0;
   return (
     <>
       {active && (
-        <RefreshBar
-          at={rt.loadedAt}
-          loading={rt.loading}
-          ms={bus ? CRTM_REFRESH_MS : REFRESH_MS}
-        />
+        <RefreshBar at={rt.loadedAt} loading={rt.loading} ms={refreshMs(bus, isEmt)} />
       )}
       {active && (
         <AppBar
@@ -525,21 +625,21 @@ function Departures({
         />
       )}
 
-      {!bus && <Alerts alerts={renfe.alerts} routeIds={routeIds} />}
+      <Alerts alerts={alerts} routeIds={routeIds} />
 
       {groups.map(([key, list]) => (
         <LineGroup
           key={key}
           list={list}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
-          hasAlert={!bus && renfe.alerts.some(a => a.routeIds.includes(list[0].routeId))}
+          hasAlert={alerts.some(a => a.routeIds.includes(list[0].routeId))}
           now={now}
         />
       ))}
       {empty && <p className="status">sin salidas en las próximas 2 horas</p>}
 
       <p className="status">
-        {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now), bus)])}
+        {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now), !renfeStop)])}
       </p>
     </>
   );
