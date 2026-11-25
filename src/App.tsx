@@ -557,6 +557,12 @@ function useStopInfo(id: string, local: Map<string, Stop>, ready: boolean) {
   return known ?? (full?.id === id ? full : undefined);
 }
 
+// "parada 16118" (bus, tram, Metro, EMT) or "estación 18000" (Renfe); empty when unknown.
+function stopCodeLabel(info: Stop | undefined, id: string): string {
+  if (info?.code) return `parada ${info.code}`;
+  return info?.k === 'r' && /^\d+$/.test(id) ? `estación ${id}` : '';
+}
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -607,7 +613,7 @@ function Departures({
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const info = useStopInfo(selected.id, stopById, !!tt);
   const wa = info?.wa ?? false;
-  const town = info?.town;
+  const subtitle = [info?.town, stopCodeLabel(info, selected.id)].filter(Boolean).join(' · ');
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
   const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
   const board = useAlertBoard(alerts, routeIds, lines);
@@ -676,7 +682,7 @@ function Departures({
       <h2 className="title">
         {short(selected.name)} <AccessMark on={wa} />
       </h2>
-      {town && <small className="sub">{town}</small>}
+      {subtitle && <small className="sub">{subtitle}</small>}
 
       {showSearch && (
         <SearchPanel
