@@ -24,7 +24,15 @@ export default function Settings() {
       <h2 className="title">about</h2>
       <p className="about">
         Cercanías Madrid timetable and live delays from Renfe open data (GTFS and GTFS-Realtime,
-        data.renfe.com). Type: Selawik (SIL OFL). Icons: Fluent UI System Icons (MIT).
+        data.renfe.com). Interurban bus timetables (no live data) from the Consorcio Regional de
+        Transportes de Madrid via the National Access Point. Type: Selawik (SIL OFL). Icons:
+        Fluent UI System Icons (MIT).
+      </p>
+      <p className="about">
+        Powered by{' '}
+        <a href="https://www.transportes.gob.es/" target="_blank" rel="noreferrer">
+          MITRAMS
+        </a>
       </p>
     </>
   );

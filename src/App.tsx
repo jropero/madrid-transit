@@ -7,6 +7,7 @@ import {
   fetchAlerts,
   fetchTripUpdates,
   isOffline,
+  loadAllStops,
   loadStopDeps,
   loadTimetable,
   type Timetable,
@@ -16,6 +17,7 @@ import {
   daysUntil,
   ddmm,
   hhmm,
+  isBus,
   loadSaved,
   locate,
   madridDate,
@@ -161,7 +163,7 @@ function LineGroup({
     <section className="group">
       <span className="tile" style={tile}>
         <b>{head.line}</b>
-        <small>cercanías</small>
+        <small>{head.bus ? 'bus' : 'cercanías'}</small>
       </span>
       <span className="deps">
         <span className="dest">
@@ -176,6 +178,10 @@ function LineGroup({
   );
 }
 
+// "bus · 17480 · Avda del Arco de la Victoria 3600" / "train".
+const stopCaption = (s: Stop) =>
+  [s.k === 'b' ? 'bus' : 'train', s.code, s.desc].filter(Boolean).join(' · ');
+
 function SearchPanel({
   query,
   onQuery,
@@ -187,7 +193,7 @@ function SearchPanel({
 }: {
   query: string;
   onQuery: (q: string) => void;
-  onSubmit: (e: React.FormEvent) => void;
+  onSubmit: (e: React.FormEvent) => void | Promise<void>;
   results: (Stop & { dist?: number })[];
   isSaved: (s: Stop) => boolean;
   onShow: (s: Stop) => void;
@@ -214,6 +220,7 @@ function SearchPanel({
               <span>
                 {s.name}
                 {s.dist !== undefined && <span className="dist"> {s.dist} m</span>}
+                <small className="sub">{stopCaption(s)}</small>
               </span>
               <button className="btn" onClick={() => onShow(s)}>
                 show
@@ -253,8 +260,8 @@ function StopsRow({
 }
 
 // The timetable file ends at `days.to`: warn a week ahead so it gets rebuilt in time.
-function expiryNote(tt: Timetable | null, now: Date) {
-  if (!tt) return '';
+function expiryNote(tt: Timetable | null, now: Date, bus: boolean) {
+  if (!tt || bus) return '';
   const today = madridDate(now);
   if (today > tt.days.to) return `timetable ended ${ddmm(tt.days.to)} — redeploy`;
   return daysUntil(tt.days.to, now) < 7 ? `timetable ends ${ddmm(tt.days.to)} — redeploy` : '';
@@ -273,7 +280,9 @@ function useDepartureList(
   const deps = useMemo(() => {
     if (!tt || !list) return [];
     const at = new Date(now);
-    return upcoming(applyRealtime(scheduled(list, tt.days, tt.routes, at), trips), now);
+    const planned = scheduled(list, tt.days, tt.routes, at);
+    // Buses are timetable only: live data applies to Renfe stops.
+    return upcoming(isBus(list) ? planned : applyRealtime(planned, trips), now);
   }, [tt, list, trips, now]);
   return { deps, now };
 }
@@ -297,7 +306,8 @@ function Departures({
   const [showSearch, setShowSearch] = useState(false);
   const { tt, error } = useTimetable();
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
-  const rt = useRealtime(active);
+  const bus = isBus(stopDeps);
+  const rt = useRealtime(active && !bus);
   const { deps, now } = useDepartureList(tt, stopDeps, rt.trips);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
@@ -309,7 +319,8 @@ function Departures({
   async function nearMe() {
     rt.setStatus('locating…');
     try {
-      const found = nearStops(tt?.stops ?? [], await locate());
+      const [here, all] = await Promise.all([locate(), loadAllStops()]);
+      const found = nearStops(all, here);
       setResults(found as NearStop[]);
       setShowSearch(true);
       rt.setStatus(found.length ? `${found.length} stops nearby` : 'no stops within 3 km');
@@ -318,17 +329,21 @@ function Departures({
     }
   }
 
-  function search(e: React.FormEvent) {
+  async function search(e: React.FormEvent) {
     e.preventDefault();
-    const found = searchStops(tt?.stops ?? [], query);
-    setResults(found);
-    if (!found.length) rt.setStatus(`no stop matches "${query.trim()}"`);
+    try {
+      const found = searchStops(await loadAllStops(), query);
+      setResults(found);
+      if (!found.length) rt.setStatus(`no stop matches "${query.trim()}"`);
+    } catch (err) {
+      rt.setStatus(isOffline(err) ? 'offline · stop list not loaded' : String(err));
+    }
   }
 
   const empty = tt && stopDeps && groups.length === 0;
   return (
     <>
-      {active && <RefreshBar at={rt.loadedAt} loading={rt.loading} />}
+      {active && !bus && <RefreshBar at={rt.loadedAt} loading={rt.loading} />}
       {active && (
         <AppBar
           actions={[
@@ -375,21 +390,26 @@ function Departures({
         />
       )}
 
-      <Alerts alerts={rt.alerts} routeIds={routeIds} />
+      {!bus && <Alerts alerts={rt.alerts} routeIds={routeIds} />}
 
       {groups.map(([key, list]) => (
         <LineGroup
           key={key}
           list={list}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
-          hasAlert={rt.alerts.some(a => a.routeIds.includes(list[0].routeId))}
+          hasAlert={!bus && rt.alerts.some(a => a.routeIds.includes(list[0].routeId))}
           now={now}
         />
       ))}
       {empty && <p className="status">no departures in the next 2 hours</p>}
 
       <p className="status">
-        {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now))])}
+        {statusLine([
+          error,
+          depsError,
+          bus ? 'timetable only, no live data' : rt.status,
+          expiryNote(tt, new Date(now), bus),
+        ])}
       </p>
     </>
   );

@@ -21,17 +21,23 @@ const memo = <T>(cache: Map<string, Promise<T>>, key: string, load: () => Promis
   return p;
 };
 
+// Renfe stops (small, destination names and step-free flags) load with the rest; the full list
+// including ~6.6k bus stops (stops.json) only loads for search and near me.
 export type Timetable = { stops: Stop[]; routes: RouteMap; days: DaysFile };
 const statics = new Map<string, Promise<Timetable>>();
 export const loadTimetable = () =>
   memo(statics, 'all', async () => {
     const [stops, routes, days] = await Promise.all([
-      getJson<Stop[]>(`${base}data/stops.json`),
+      getJson<Stop[]>(`${base}data/stops-renfe.json`),
       getJson<RouteMap>(`${base}data/routes.json`),
       getJson<DaysFile>(`${base}data/days.json`),
     ]);
     return { stops, routes, days };
   });
+
+const allStopsMemo = new Map<string, Promise<Stop[]>>();
+export const loadAllStops = () =>
+  memo(allStopsMemo, 'all', () => getJson<Stop[]>(`${base}data/stops.json`));
 
 const perStop = new Map<string, Promise<StopFile>>();
 export const loadStopDeps = (id: string) =>

@@ -521,6 +521,13 @@ button:disabled {
   font-size: var(--t-small);
 }
 
+.results li .sub {
+  display: block;
+  color: var(--muted);
+  font-size: var(--t-small);
+  text-transform: lowercase;
+}
+
 .route.sm {
   margin-left: 19px;
 }
@@ -729,5 +736,9 @@ button:disabled {
 .about {
   font-size: var(--t-small);
   color: var(--muted);
-  margin: 0;
+  margin: 0 0 8px;
+}
+
+.about a {
+  color: var(--accent);
 }

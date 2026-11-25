@@ -1,17 +1,41 @@
 // Shared logic: Madrid time, departures from the local timetable, GTFS-RT merging, alerts, stop search.
 import { loadJson, saveJson } from './storage.ts';
 
-export type Stop = { id: string; name: string; lat: number; lon: number; wa: boolean };
-export type RouteInfo = { line: string; color: string; text: string };
+// k: 'r' Renfe station, 'b' bus stop (with its code and street, to tell the two sides of a road apart).
+export type Stop = {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  wa: boolean;
+  k?: 'r' | 'b';
+  code?: string;
+  desc?: string;
+};
+export type RouteInfo = { line: string; color: string; text: string; name?: string };
 export type RouteMap = Record<string, RouteInfo>;
 export type DaysFile = { from: string; to: string; days: Record<string, string[]> };
 // Per-stop timetable file: route ids (r), destination stop ids (d) and, per service id, rows of
 // [secs since service-day midnight (may exceed 24h), trip id minus the service-id prefix, r index, d index].
-export type StopFile = {
+export type RenfeFile = {
   r: string[];
   d: string[];
   s: Record<string, [number, string, number, number][]>;
 };
+// Bus stop file (timetable only): route ids (r), headsigns (h), calendars (c: weekday bitmask with
+// bit 0 = Sunday, start and end yyyymmdd, added and removed yyyymmdd dates) and rows
+// [secs since service-day midnight (may exceed 24h), c index, r index, h index], sorted by secs.
+export type BusCalendar = [number, number, number, number[], number[]];
+export type BusFile = {
+  kind: 'bus';
+  r: string[];
+  h: string[];
+  c: BusCalendar[];
+  d: [number, number, number, number][];
+};
+export type StopFile = RenfeFile | BusFile;
+export const isBus = (f: StopFile | null | undefined): f is BusFile =>
+  !!f && 'kind' in f && f.kind === 'bus';
 
 export type Departure = {
   tripId: string;
@@ -19,7 +43,8 @@ export type Departure = {
   line: string;
   color: string;
   text: string;
-  dest: string;
+  dest: string; // Renfe: destination stop id; bus: headsign
+  bus?: boolean;
   planned: Date;
   expected: Date;
   cancelled: boolean;
@@ -50,17 +75,19 @@ const MADRID = 'Europe/Madrid';
 const HORIZON_MS = 2 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const PARTS_FORMAT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: MADRID,
+  hourCycle: 'h23',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+});
+
 const parts = (d: Date) => {
-  const f = new Intl.DateTimeFormat('en-GB', {
-    timeZone: MADRID,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(d);
+  const f = PARTS_FORMAT.formatToParts(d);
   const get = (t: string) => Number(f.find(p => p.type === t)?.value);
   return {
     y: get('year'),
@@ -132,7 +159,7 @@ const inWindow = (t: number, now: Date) =>
 
 // One service day's rows for a stop -> departures inside the window.
 function dayDepartures(
-  file: StopFile,
+  file: RenfeFile,
   day: string,
   routes: RouteMap,
   now: Date,
@@ -159,10 +186,10 @@ function dayDepartures(
   return out;
 }
 
-// Scheduled departures within [now - 15 min, now + 2 h], from today's and yesterday's service days
+// Renfe: scheduled departures within [now - 15 min, now + 2 h], from today's and yesterday's service days
 // (yesterday's trips run past midnight with secs >= 24h).
-export function scheduled(
-  file: StopFile,
+function renfeScheduled(
+  file: RenfeFile,
   days: DaysFile,
   routes: RouteMap,
   now: Date,
@@ -174,6 +201,92 @@ export function scheduled(
     )
     .sort((a, b) => a.planned.getTime() - b.planned.getTime());
 }
+
+// Does a bus calendar run on a service day (yyyymmdd)? Removed dates win over added ones, which
+// win over the weekly pattern.
+export function busActive(c: BusCalendar, day: string): boolean {
+  const n = Number(day);
+  if (c[4].includes(n)) return false;
+  if (c[3].includes(n)) return true;
+  const weekday = new Date(Date.UTC(+day.slice(0, 4), +day.slice(4, 6) - 1, +day.slice(6, 8)));
+  return n >= c[1] && n <= c[2] && ((c[0] >> weekday.getUTCDay()) & 1) === 1;
+}
+
+// One service day's bus rows -> departures inside the window. Rows are prefiltered on seconds
+// (with an hour of slack for DST days) so only a few reach the slower madridTime.
+function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Departure[] {
+  const midnight = madridTime(day, 0).getTime();
+  const from = (now.getTime() - 15 * 60_000 - midnight) / 1000 - 3600;
+  const to = (now.getTime() + HORIZON_MS - midnight) / 1000 + 3600;
+  const active = file.c.map(c => busActive(c, day));
+  const out: Departure[] = [];
+  file.d.forEach(([secs, ci, ri, hsi], i) => {
+    const r = routes[file.r[ri]];
+    if (secs < from || secs > to || !active[ci] || !r) return;
+    const planned = madridTime(day, secs);
+    if (!inWindow(planned.getTime(), now)) return;
+    out.push({
+      tripId: `${day}-${i}`,
+      routeId: file.r[ri],
+      line: r.line,
+      color: r.color,
+      text: r.text,
+      dest: file.h[hsi],
+      bus: true,
+      planned,
+      expected: planned,
+      cancelled: false,
+    });
+  });
+  return out;
+}
+
+// Bus timetable only: no live data. Today's and yesterday's service days (> 24h times).
+export function busScheduled(file: BusFile, routes: RouteMap, now: Date): Departure[] {
+  const today = madridDate(now);
+  return [shiftDay(today, -1), today]
+    .flatMap(day => busDay(file, day, routes, now))
+    .sort((a, b) => a.planned.getTime() - b.planned.getTime());
+}
+
+// Scheduled departures for either kind of stop file.
+export const scheduled = (file: StopFile, days: DaysFile, routes: RouteMap, now: Date) =>
+  isBus(file) ? busScheduled(file, routes, now) : renfeScheduled(file, days, routes, now);
+
+// Self-checks: 2026-11-25 is a Wednesday, 2026-11-29 a Sunday; Madrid is UTC+1 in winter.
+console.assert(
+  (() => {
+    const routes: RouteMap = { R: { line: '1', color: '#8EBF42', text: '#fff' } };
+    const file = (c: BusCalendar, secs: number): BusFile => ({
+      kind: 'bus',
+      r: ['R'],
+      h: ['X'],
+      c: [c],
+      d: [[secs, 0, 0, 0]],
+    });
+    const at = (iso: string) => new Date(iso);
+    // Sunday-only service at 08:00: runs on Sunday 29th, not on Wednesday 25th.
+    const sun = file([1, 20261101, 20271231, [], []], 8 * 3600);
+    const sunOk =
+      busScheduled(sun, routes, at('2026-11-29T06:50:00Z')).length === 1 &&
+      busScheduled(sun, routes, at('2026-11-25T06:50:00Z')).length === 0;
+    // Every day, but Wednesday 25th removed.
+    const holiday = file([127, 20261101, 20271231, [], [20261125]], 8 * 3600);
+    const removedOk =
+      busScheduled(holiday, routes, at('2026-11-25T06:50:00Z')).length === 0 &&
+      busScheduled(holiday, routes, at('2026-11-26T06:50:00Z')).length === 1;
+    // 24:02 of the 25th is 00:02 on the 26th: shown just after midnight (23:30Z = 00:30 CET).
+    const late = file([127, 20261101, 20271231, [], []], 24 * 3600 + 120);
+    const lateDeps = busScheduled(late, routes, at('2026-11-25T23:10:00Z'));
+    const lateOk =
+      lateDeps.length === 1 && lateDeps[0].planned.toISOString() === '2026-11-25T23:02:00.000Z';
+    // An added date outside the weekly pattern runs.
+    const added = file([0, 20261101, 20271231, [20261125], []], 8 * 3600);
+    const addedOk = busScheduled(added, routes, at('2026-11-25T06:50:00Z')).length === 1;
+    return sunOk && removedOk && lateOk && addedOk;
+  })(),
+  'busScheduled: Sunday-only, removed date, 24:02 after midnight, added date',
+);
 
 // Trip-level delay (seconds) and cancellation from GTFS-RT; the feed covers all of Spain.
 export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Departure[] {
@@ -276,11 +389,37 @@ const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCas
 console.assert(fold('Chamartín') === 'chamartin', 'fold');
 
 // Accent-insensitive substring search over every word of the name.
+// Ranks a stop for a search: exact stop code, name prefix, name substring, street; null = no match.
+const rank = (s: Stop, needle: string): number | null => {
+  const name = fold(s.name);
+  if (s.code === needle) return 0;
+  if (name.startsWith(needle)) return 1;
+  if (name.includes(needle)) return 2;
+  return fold(s.desc ?? '').includes(needle) ? 3 : null;
+};
+
 export const searchStops = (stops: Stop[], q: string): Stop[] => {
   const needle = fold(q.trim());
   if (!needle) return [];
-  return stops.filter(s => fold(s.name).includes(needle)).slice(0, 15);
+  return stops
+    .flatMap(s => {
+      const r = rank(s, needle);
+      return r === null ? [] : [{ s, r }];
+    })
+    .sort((a, b) => a.r - b.r)
+    .slice(0, 15)
+    .map(x => x.s);
 };
+console.assert(
+  searchStops(
+    [
+      { id: 'a', name: 'X Sol', lat: 0, lon: 0, wa: false },
+      { id: 'b', name: 'Sol', lat: 0, lon: 0, wa: false },
+    ],
+    'sol',
+  )[0].id === 'b',
+  'searchStops ranks prefix matches first',
+);
 
 // Equirectangular approximation: fine at city scale.
 export const metres = (a: { lat: number; lon: number }, b: { lat: number; lon: number }) => {
