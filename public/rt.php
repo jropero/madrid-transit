@@ -15,9 +15,11 @@
 //   - Upstream budget per minute (EMT_BUDGET / CRTM_BUDGET below); over it -> stale cache or 503.
 //   - A failed stop is remembered NEG_TTL s (negative cache) so retries do not hit the upstream.
 //   - Per client: IP_LIMIT requests/min (only a SHA-256 of IP+minute is stored) -> 429.
-// Why an upstream call failed is kept per cache file (uerr-<cache name>, cleared by the next
+// Why an upstream call failed is kept per cache file (uerr-<cache name>, JSON, cleared by the next
 // success) and sent as `X-Upstream-Error: <http code, 0 = none> <timeout|network|http|invalid|html>`
-// with a stale copy and with the 502/503 answers (the client shows it under the status).
+// with a stale copy and with the 502/503 answers (the client shows it under the status). The file
+// also keeps the failure time and the first 2048 bytes of the answer; `&why=1` on a normal request
+// returns them as JSON {code, kind, at, body} ({} if none) without any upstream call.
 
 header('X-Content-Type-Options: nosniff');
 
@@ -145,10 +147,15 @@ function over_budget(): bool {
 
 // ---------------------------------------------------------------- Upstream failure reason
 
-// Remembers why the last upstream call for the current cache file failed ("<code> <kind>").
-function up_fail(int $status, string $kind): void {
+// Remembers why the last upstream call for the current cache file failed, as JSON
+// {code, kind, at, body}: `body` is the first 2048 bytes of the upstream answer (shown by ?why=1).
+function up_fail(int $status, string $kind, ?string $body = null): void {
     if (isset($GLOBALS['uerr_cache'])) {
-        state_write(state_file('uerr-' . basename($GLOBALS['uerr_cache'])), $status . ' ' . $kind, 0600);
+        $rec = ['code' => $status, 'kind' => $kind, 'at' => time(), 'body' => substr($body ?? '', 0, 2048)];
+        $json = json_encode($rec, JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json !== false) {
+            state_write(state_file('uerr-' . basename($GLOBALS['uerr_cache'])), $json, 0600);
+        }
     }
 }
 
@@ -158,13 +165,32 @@ function up_ok(): void {
     }
 }
 
-// The remembered reason, only if it has the expected shape (it ends up in a header).
-function up_read(): ?string {
+// The remembered failure, only if it has the expected shape (code and kind end up in a header).
+function up_load(): ?array {
     if (!isset($GLOBALS['uerr_cache'])) {
         return null;
     }
-    $v = @file_get_contents(state_file('uerr-' . basename($GLOBALS['uerr_cache'])));
-    return is_string($v) && preg_match('/^\d{1,3} (timeout|network|http|invalid|html)\z/', $v) === 1 ? $v : null;
+    $r = json_decode((string) @file_get_contents(state_file('uerr-' . basename($GLOBALS['uerr_cache']))), true);
+    if (is_array($r) && is_int($r['code'] ?? null) && $r['code'] >= 0 && $r['code'] <= 999
+        && is_string($r['kind'] ?? null) && preg_match('/^(timeout|network|http|invalid|html)\z/', $r['kind']) === 1
+        && is_int($r['at'] ?? null) && is_string($r['body'] ?? null)) {
+        return $r;
+    }
+    return null;
+}
+
+function up_read(): ?string {
+    $r = up_load();
+    return $r === null ? null : $r['code'] . ' ' . $r['kind'];
+}
+
+// ?why=1: the stored failure as JSON ({} if none). Never contacts an upstream.
+function serve_why(): void {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    $r = up_load();
+    echo $r === null ? '{}' : json_encode($r, JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
 }
 
 function up_header(): void {
@@ -270,7 +296,7 @@ function emt_http(string $method, string $url, array $headers, ?string $body = n
 function emt_record(): void {
     [$status, $body, $timedOut] = $GLOBALS['last_http'] ?? [0, null, false];
     [$s, $k] = up_classify($status, $body, $timedOut);
-    up_fail($s, $k);
+    up_fail($s, $k, $body);
 }
 
 // A header value must be printable ASCII (space included, for passwords) with no CR/LF,
@@ -451,7 +477,7 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
         } else {
             $timedOut = $body === false && $status === 0 && microtime(true) - $t0 >= http_timeout() - 0.5;
             [$s, $k] = up_classify($status, $body === false ? null : $body, $timedOut);
-            up_fail($s, $k);
+            up_fail($s, $k, $body === false ? null : $body);
             if ($neg !== null) {
                 neg_set($neg, 502, 'upstream unavailable');
             }
@@ -535,4 +561,7 @@ if ($f === 'emt') {
 
 rate_limit_ip();
 $GLOBALS['uerr_cache'] = $cache;
+if (($_GET['why'] ?? '') === '1') {
+    serve_why();
+}
 serve_swr($cache, $ttl, $refresh);

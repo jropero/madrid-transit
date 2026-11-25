@@ -617,10 +617,41 @@ p.next {
 }
 
 .status-note {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
   font-size: var(--t-small);
   color: var(--muted);
   margin-top: 4px;
   opacity: 0.8;
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.status-why {
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.status-why p {
+  margin: 2px 0;
+}
+
+.status-why-body {
+  margin: 2px 0 0;
+  max-height: 8em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  border-left: 2px solid var(--muted);
+  padding-left: 8px;
 }
 
 .results li .dist {

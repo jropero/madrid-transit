@@ -15,6 +15,8 @@ import {
   type Stop,
   type StopTimeUpdate,
   type TripUpdates,
+  isLiveStale,
+  type FeedNote,
   type UpstreamError,
   type VehiclePositions,
   type VehicleStatus,
@@ -41,11 +43,18 @@ const dataAgeMs = (res: Response) => {
 };
 
 // A live feed failed: HTTP status (0 = none) and kind (timeout | network | http | invalid | html).
+// `url` / `body` (first 2048 chars of the failing response) / `at` feed the status note details.
+const BODY_MAX = 2048;
 export class FeedError extends Error {
   readonly upstream: UpstreamError;
-  constructor(upstream: UpstreamError, message: string) {
+  readonly url: string;
+  readonly body: string | undefined;
+  readonly at = Date.now();
+  constructor(upstream: UpstreamError, message: string, url: string, body?: string) {
     super(message);
     this.upstream = upstream;
+    this.url = url;
+    this.body = body?.slice(0, BODY_MAX);
   }
 }
 
@@ -70,7 +79,12 @@ const readJson = async <T>(res: Response, url: string): Promise<T> => {
     return JSON.parse(text) as T;
   } catch {
     const kind = text.trimStart().startsWith('<') ? 'html' : 'invalid';
-    throw new FeedError({ code: res.status, kind }, `invalid response (${kind}): ${url}`);
+    throw new FeedError(
+      { code: res.status, kind },
+      `invalid response (${kind}): ${url}`,
+      url,
+      text,
+    );
   }
 };
 
@@ -79,6 +93,33 @@ export const upstreamOf = (err: unknown): UpstreamError | null => {
   if (err instanceof FeedError) return err.upstream;
   return isTimeout(err) ? { code: 0, kind: 'timeout' } : null;
 };
+
+// The status note of a failed live fetch (null when offline or not a feed failure).
+export const errNoteOf = (label: string, err: unknown): FeedNote | null => {
+  const e = upstreamOf(err);
+  if (!e) return null;
+  const f = err instanceof FeedError ? err : null;
+  return { label, err: e, url: f?.url, body: f?.body, at: f?.at };
+};
+
+// The note of a feed that answered from an old copy because rt.php's upstream call failed.
+export const feedNoteOf = (label: string, feed: Feed<unknown>): FeedNote | null =>
+  feed.upstream ? { label, err: feed.upstream, url: feed.url } : null;
+
+// What rt.php remembers about the last failure of a feed (`&why=1`); null when it has nothing
+// (or the answer is not that shape, e.g. dev, which has no rt.php).
+export type Why = { code: number; kind: string; at: number; body: string };
+export async function fetchWhy(url: string): Promise<Why | null> {
+  const res = await fetch(`${url}&why=1`);
+  if (!res.ok) return null;
+  const w = (await res.json()) as Partial<Why> | null;
+  const ok =
+    typeof w?.code === 'number' &&
+    typeof w.kind === 'string' &&
+    typeof w.at === 'number' &&
+    typeof w.body === 'string';
+  return ok ? (w as Why) : null;
+}
 
 const getLive = async <T>(
   url: string,
@@ -93,7 +134,8 @@ const getLive = async <T>(
     const upstream = upstreamHeader(res);
     if (!res.ok) {
       const e = upstream ?? { code: res.status, kind: 'http' };
-      throw new FeedError(e, `HTTP ${res.status}: ${url}`);
+      const body = await res.text().catch(() => '');
+      throw new FeedError(e, `HTTP ${res.status}: ${url}`, url, body);
     }
     const fetchedAt = Date.now() - dataAgeMs(res);
     return { data: await readJson<T>(res, url), fetchedAt, upstream };
@@ -178,37 +220,56 @@ export const isOffline = (err: unknown) => err instanceof TypeError;
 
 // fetchedAt: when the answer was fetched upstream (now minus X-Data-Age; the copy time offline).
 // upstream: set when rt.php served an old copy because its own upstream call failed.
+// stale: the copy is older than LIVE_MAX_AGE_MS, so `data` is the feed's empty value.
 export type Feed<T> = {
   data: T;
   offlineSince: Date | null;
   fetchedAt: number;
   upstream?: UpstreamError;
+  url?: string;
+  stale?: boolean;
 };
+
+// Times, delays and positions of a too old copy are dropped (`empty` = a feed with no data);
+// feeds without `empty` (alerts) are kept whatever their age.
+const cutoff = <T>(feed: Feed<T>, empty: T | undefined): Feed<T> =>
+  empty !== undefined && isLiveStale(feed.fetchedAt, Date.now())
+    ? { ...feed, data: empty, offlineSince: null, stale: true }
+    : feed;
 
 // Online: fetch and remember. No network: the last stored copy (offlineSince = when it was fetched).
 async function fetchFeed<T, R = T>(
   name: string,
   query: string,
   slim: (raw: R) => T,
+  empty?: T,
 ): Promise<Feed<T>> {
   const key = `madrid-transit:cache:rt:${name}`;
+  const url = `${base}rt.php?${query}`;
   try {
-    const live = await getLive<R>(`${base}rt.php?${query}`);
+    const live = await getLive<R>(url);
     const data = slim(live.data);
-    saveJson(key, { at: Date.now(), data });
-    return { data, offlineSince: null, fetchedAt: live.fetchedAt, upstream: live.upstream };
+    saveJson(key, { at: live.fetchedAt, data });
+    return cutoff(
+      { data, offlineSince: null, fetchedAt: live.fetchedAt, upstream: live.upstream, url },
+      empty,
+    );
   } catch (err) {
     const c = loadJson<{ at: number; data: T } | null>(key, null);
     if (isOffline(err) && c)
-      return { data: c.data, offlineSince: new Date(c.at), fetchedAt: c.at };
+      return cutoff(
+        { data: c.data, offlineSince: new Date(c.at), fetchedAt: c.at, url },
+        empty,
+      );
     throw err;
   }
 }
 
+const NO_TRIPS: TripUpdates = { entity: [] };
 export const fetchTripUpdates = () =>
-  fetchFeed<TripUpdates>('trip_updates', 'f=trip_updates', slimTrips);
+  fetchFeed<TripUpdates>('trip_updates', 'f=trip_updates', slimTrips, NO_TRIPS);
 export const fetchTripUpdatesLd = () =>
-  fetchFeed<TripUpdates>('trip_updates_LD', 'f=trip_updates_LD', slimTrips);
+  fetchFeed<TripUpdates>('trip_updates_LD', 'f=trip_updates_LD', slimTrips, NO_TRIPS);
 // Train positions (follow view only), cut down to trip, stop, status and time.
 type RawPositions = {
   entity?: {
@@ -237,11 +298,13 @@ export const fetchPositions = (ld: boolean) => {
   const hit = positionsMemo.get(ld);
   if (hit && Date.now() - hit.at < POSITIONS_MEMO_MS) return hit.p;
   const name = ld ? 'vehicle_positions_LD' : 'vehicle_positions';
-  const p = fetchFeed<VehiclePositions, RawPositions>(name, `f=${name}`, slimPositions);
+  const p = fetchFeed<VehiclePositions, RawPositions>(name, `f=${name}`, slimPositions, {
+    entity: [],
+  });
   positionsMemo.set(ld, { at: Date.now(), p });
   // Failures and offline copies are not memoised: the next refresh retries.
   p.then(
-    f => f.offlineSince && positionsMemo.delete(ld),
+    f => (f.offlineSince || f.stale) && positionsMemo.delete(ld),
     () => positionsMemo.delete(ld),
   );
   return p;
@@ -262,11 +325,12 @@ export const fetchCrtm = (stopId: string) => {
     `crtm:${code}`,
     `f=crtm&stop=${encodeURIComponent(code)}`,
     f => f,
+    {},
   );
   crtmMemo.set(code, { at: Date.now(), p });
   // Failures and offline copies are not memoised: the next refresh retries.
   p.then(
-    f => f.offlineSince && crtmMemo.delete(code),
+    f => (f.offlineSince || f.stale) && crtmMemo.delete(code),
     () => crtmMemo.delete(code),
   );
   return p;
@@ -303,10 +367,10 @@ export const fetchEmt = (stopId: string) => {
   const n = stopId.replace(/^emt_/, '');
   const hit = emtMemo.get(n);
   if (hit && Date.now() - hit.at < EMT_MEMO_MS) return hit.p;
-  const p = fetchFeed<EmtJson>(`emt:${n}`, `f=emt&stop=${encodeURIComponent(n)}`, f => f);
+  const p = fetchFeed<EmtJson>(`emt:${n}`, `f=emt&stop=${encodeURIComponent(n)}`, f => f, {});
   emtMemo.set(n, { at: Date.now(), p });
   p.then(
-    f => f.offlineSince && emtMemo.delete(n),
+    f => (f.offlineSince || f.stale) && emtMemo.delete(n),
     () => emtMemo.delete(n),
   );
   return p;

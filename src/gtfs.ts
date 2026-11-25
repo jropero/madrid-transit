@@ -1804,15 +1804,51 @@ const HTTP_MEANING: Record<number, string> = {
 const httpMeaning = (code: number) =>
   HTTP_MEANING[code] ?? (code >= 500 ? 'error del servidor' : 'error');
 
-// Second status line: "CRTM: HTTP 502 · error del servidor".
-export function upstreamText(label: string, e: UpstreamError): string {
-  const http = `${label}: HTTP ${e.code}`;
-  if (e.kind === 'timeout') return `${label}: sin respuesta (tiempo agotado)`;
-  if (e.kind === 'network') return `${label}: sin respuesta (error de red)`;
-  if (e.kind === 'html') return `${http} · respuesta no válida (HTML)`;
-  if (e.kind === 'invalid') return `${http} · respuesta no válida`;
-  return `${http} · ${httpMeaning(e.code)}`;
+// The failure in words: "HTTP 502 · error del servidor" / "sin respuesta (tiempo agotado)".
+export function upstreamMeaning(e: UpstreamError): string {
+  if (e.kind === 'timeout') return 'sin respuesta (tiempo agotado)';
+  if (e.kind === 'network') return 'sin respuesta (error de red)';
+  if (e.kind === 'html') return `HTTP ${e.code} · respuesta no válida (HTML)`;
+  if (e.kind === 'invalid') return `HTTP ${e.code} · respuesta no válida`;
+  return `HTTP ${e.code} · ${httpMeaning(e.code)}`;
 }
+
+// Second status line: "CRTM: HTTP 502 · error del servidor".
+export const upstreamText = (label: string, e: UpstreamError) =>
+  `${label}: ${upstreamMeaning(e)}`;
+
+// A failing live feed as the status note shows it. `url`: the rt.php request (for `&why=1`);
+// `body` / `at`: the failing response (first 2048 chars) and its time when the client has them.
+export type FeedNote = {
+  label: string;
+  err: UpstreamError;
+  url?: string;
+  body?: string;
+  at?: number;
+};
+
+// Live copies older than this are not used for times, delays or positions (the timetable takes over).
+export const LIVE_MAX_AGE_MS = 30 * 60_000;
+export const isLiveStale = (fetchedAt: number, now: number) =>
+  now - fetchedAt > LIVE_MAX_AGE_MS;
+console.assert(
+  !isLiveStale(1000, 1000 + LIVE_MAX_AGE_MS) && isLiveStale(1000, 1001 + LIVE_MAX_AGE_MS),
+  'isLiveStale',
+);
+
+// Status of a feed whose latest copy is too old: "CRTM: últimos datos de las 19:18 · horario".
+export const staleText = (label: string, fetchedAt: number, timetable: boolean) =>
+  `${label}: últimos datos de las ${hhmm(new Date(fetchedAt))} · ${
+    timetable ? 'horario' : 'sin datos en vivo'
+  }`;
+console.assert(
+  staleText('CRTM', Date.UTC(2026, 0, 15, 18, 18), true) ===
+    'CRTM: últimos datos de las 19:18 · horario' &&
+    staleText('CRTM', Date.UTC(2026, 0, 15, 18, 18), false) ===
+      'CRTM: últimos datos de las 19:18 · sin datos en vivo',
+  'staleText',
+);
+
 console.assert(
   upstreamText('CRTM', { code: 200, kind: 'html' }) ===
     'CRTM: HTTP 200 · respuesta no válida (HTML)' &&
