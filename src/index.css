@@ -885,11 +885,18 @@ p.next {
 }
 
 .near .link {
+  display: block;
   text-align: left;
   padding: 6px 0;
 }
 
-.near .dist {
+.near .name {
+  display: block;
+  text-transform: lowercase;
+}
+
+.near .sub {
+  display: block;
   color: var(--muted);
 }
 

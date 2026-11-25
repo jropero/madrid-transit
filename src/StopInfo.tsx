@@ -16,6 +16,7 @@ import {
   type RouteInfo,
   type RouteMap,
   type Saved,
+  short,
   type Stop,
 } from './gtfs.ts';
 
@@ -263,10 +264,20 @@ function useNearby(stop: Stop | undefined) {
   return near;
 }
 
-const label = (s: NearStop, lines: string[]) => {
-  const main = s.k === 'b' || s.k === 'e' ? (s.code ?? s.name) : s.name;
-  return `${stopKind(s)} ${main}${lines.length ? ` (${lines.join(', ')})` : ''}`;
+const MAX_NEAR_LINES = 6;
+
+// "65 · Calle del Doctor Esquerdo 49 · 14, 150, 27… · 63 m" (code only for stops that have one).
+const detail = (s: NearStop, lines: string[]) => {
+  const list = lines.slice(0, MAX_NEAR_LINES).join(', ');
+  const more = lines.length > MAX_NEAR_LINES ? '…' : '';
+  return [s.code, s.desc, list && `${list}${more}`, `${s.dist} m`].filter(Boolean).join(' · ');
 };
+console.assert(
+  detail({ code: '65', desc: 'Calle X 1', dist: 63 } as NearStop, ['1', '2']) ===
+    '65 · Calle X 1 · 1, 2 · 63 m' &&
+    detail({ dist: 5 } as NearStop, '1234567'.split('')) === '1, 2, 3, 4, 5, 6… · 5 m',
+  'Nearby detail line',
+);
 
 const groupByKind = (near: NearStop[]) => {
   const groups = new Map<string, NearStop[]>();
@@ -296,9 +307,15 @@ function Nearby({
             const lines = [...new Set(ids.flatMap(id => routes[id]?.line ?? []))];
             return (
               <li key={s.id}>
-                <button className="link" onClick={() => onSelect({ id: s.id, name: s.name })}>
-                  <span>{label(s, lines.slice(0, 6))}</span>
-                  <span className="dist"> · {s.dist} m</span>
+                <button
+                  className="link"
+                  aria-label={`Ver salidas de ${short(s.name)}`}
+                  onClick={() => onSelect({ id: s.id, name: s.name })}
+                >
+                  <span className="name">
+                    {stopKind(s)} · {short(s.name)}
+                  </span>
+                  <span className="sub">{detail(s, lines)}</span>
                 </button>
               </li>
             );

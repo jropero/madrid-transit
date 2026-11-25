@@ -75,6 +75,7 @@ const ML = {
   zip: `${CACHE}ml.zip`,
   layer: 'M10_Red',
   townCache: `${CACHE}crtm-m10.json`,
+  address: true,
 };
 
 // Metro de Madrid: public ArcGIS item "GTFS Red de Metro" (1.5 MB). Stale calendar (ends
@@ -88,6 +89,7 @@ const METRO = {
   zip: `${CACHE}metro.zip`,
   layer: 'M4_Red',
   townCache: `${CACHE}crtm-m4.json`,
+  address: true,
 };
 
 // EMT city buses: public ArcGIS item (CRTM "GTFS Red de EMT", no key, 21 MB). Frequency-based
@@ -98,6 +100,9 @@ const EMT = {
   color: '0178BC',
   url: 'https://www.arcgis.com/sharing/rest/content/items/868df0e58fca47e79b942902dffd7da0/data',
   zip: `${CACHE}emt.zip`,
+  layer: 'M6_Red',
+  townCache: `${CACHE}crtm-m6.json`,
+  address: true,
 };
 
 // Minimal CSV line split with quote support; every field is trimmed (GTFS here is space-padded).
@@ -930,10 +935,12 @@ async function buildEmt() {
 const municipios = () => JSON.parse(readFileSync(`${ROOT}scripts/municipios.json`, 'utf8'));
 
 // One ArcGIS page: CODIGOESTACION (= GTFS stop_code) -> INE code (province + municipality).
-async function crtmPage(layer, offset) {
+const TOWN_FIELDS = 'CODIGOESTACION,CODIGOMUNICIPIO,CODIGOPROVINCIA';
+const ADDRESS_FIELDS = 'TIPOVIA,PARTICULA,NOMBREVIA,NUMEROPORTAL';
+async function crtmPage(layer, offset, address) {
   const params = new URLSearchParams({
     where: '1=1',
-    outFields: 'CODIGOESTACION,CODIGOMUNICIPIO,CODIGOPROVINCIA',
+    outFields: address ? `${TOWN_FIELDS},${ADDRESS_FIELDS}` : TOWN_FIELDS,
     returnGeometry: 'false',
     f: 'json',
     resultOffset: String(offset),
@@ -945,10 +952,10 @@ async function crtmPage(layer, offset) {
   return res.json();
 }
 
-async function crtmRecords(layer) {
+async function crtmRecords(layer, address) {
   const records = [];
   for (let more = true; more;) {
-    const page = await crtmPage(layer, records.length);
+    const page = await crtmPage(layer, records.length, address);
     const got = (page.features ?? []).map(f => f.attributes ?? {});
     records.push(...got);
     more = !!page.exceededTransferLimit && got.length > 0;
@@ -964,7 +971,9 @@ console.assert(ineOf({ CODIGOPROVINCIA: '5', CODIGOMUNICIPIO: 7 }) === '05007', 
 const readCache = feed => {
   try {
     const data = JSON.parse(readFileSync(feed.townCache, 'utf8'));
-    return Array.isArray(data) ? data : null;
+    // A cache written before the address fields were requested is unusable for address feeds.
+    const ok = Array.isArray(data) && (!feed.address || !data.length || 'NOMBREVIA' in data[0]);
+    return ok ? data : null;
   } catch {
     return null;
   }
@@ -973,7 +982,7 @@ const cacheFresh = feed =>
   existsSync(feed.townCache) && Date.now() - statSync(feed.townCache).mtimeMs < TOWN_MAX_AGE_MS;
 
 async function fetchRecords(feed) {
-  const records = await crtmRecords(feed.layer);
+  const records = await crtmRecords(feed.layer, !!feed.address);
   if (!records.length) throw new Error('no records');
   await writeFile(feed.townCache, JSON.stringify(records));
   return records;
@@ -1004,6 +1013,35 @@ async function townsByCode(feed) {
     if (name && r.CODIGOESTACION != null) byCode.set(String(r.CODIGOESTACION).trim(), name);
   }
   return byCode;
+}
+
+// "<TIPOVIA> <PARTICULA> <NOMBREVIA> <NUMEROPORTAL>" without blank parts (PARTICULA ' ' = none).
+const addressOf = r =>
+  [r.TIPOVIA, r.PARTICULA, r.NOMBREVIA, r.NUMEROPORTAL]
+    .map(v => String(v ?? '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ');
+console.assert(
+  addressOf({
+    TIPOVIA: 'Calle',
+    PARTICULA: 'del',
+    NOMBREVIA: 'Doctor Esquerdo',
+    NUMEROPORTAL: 49,
+  }) === 'Calle del Doctor Esquerdo 49' &&
+    addressOf({ TIPOVIA: 'Calle', PARTICULA: ' ', NOMBREVIA: 'Mayor', NUMEROPORTAL: '' }) ===
+      'Calle Mayor',
+  'addressOf',
+);
+
+// Fills `desc` (street address) from the feed's layer on stops that have none. Returns the
+// number of stops that now have one.
+async function assignAddresses(stops, feed) {
+  const byCode = new Map();
+  for (const r of await crtmData(feed))
+    byCode.set(String(r.CODIGOESTACION ?? '').trim(), addressOf(r));
+  for (const s of stops) if (!s.desc?.trim()) s.desc = byCode.get(s.code) || s.desc;
+  return stops.filter(s => s.desc?.trim()).length;
 }
 
 // Town of the nearest stop within 1,500 m, or ''.
@@ -1222,6 +1260,14 @@ async function main() {
   const metro = await buildMetro();
   const emt = await buildEmt();
   const urbOnly = urb ? urbanOnlyStops(bus, urb) : [];
+  const a = {
+    emt: emt ? await assignAddresses(emt.stops, EMT) : 0,
+    metro: metro ? await assignAddresses(metro.stops, METRO) : 0,
+    ml: ml ? await assignAddresses(ml.stops, ML) : 0,
+  };
+  console.log(
+    `addresses: EMT ${a.emt}/${emt?.stops.length ?? 0}, metro ${a.metro}/${metro?.stops.length ?? 0}, light rail ${a.ml}/${ml?.stops.length ?? 0}`,
+  );
   const t = await assignTowns(renfe.stops, bus, ml, metro, urbOnly);
   console.log(
     `towns: town-only bus ${t.urb}/${urbOnly.length}, bus ${t.bus}/${bus?.stops.length ?? 0}, light rail ${t.ml}/${ml?.stops.length ?? 0}, metro ${t.metro}/${metro?.stops.length ?? 0}, renfe ${t.renfe}/${renfe.stops.length} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
