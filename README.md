@@ -33,8 +33,19 @@ Notes for coding agents are in [AGENTS.md](AGENTS.md).
 Deployed at https://ekult.co.uk/m/.
 
 - `base: '/m/'` in `vite.config.ts` is absolute on purpose (PWA scope).
-- `pnpm build` rebuilds the timetable and the app. Copy the **entire** `dist/` to the server's `/m/` directory, including `rt.php` (PHP hosting required).
-- The feed horizon is about one month: **rebuild and redeploy at least every ~3 weeks**. The app warns when the timetable ends within 7 days.
+- `pnpm build` rebuilds the timetable and the app. The **entire** `dist/` belongs in the server's `/m/` directory, including `rt.php` (PHP hosting required).
+- The feed horizon is about one month. The app warns when the timetable ends within 7 days.
+
+### GitHub Actions
+
+`.github/workflows/deploy.yml` builds and deploys over SSH on every push to `main`, nightly at 02:30 UTC (after Renfe's daily update, so the timetable never runs out) and on demand (`gh workflow run deploy.yml`). Steps: install, `pnpm run build` (with `NAP_TOKEN`), `scripts/check-dist.mjs` (sanity gate: data files and `rt.php` exist, Renfe timetable has at least 3 days left, more than 1000 stop files), then `rsync -az --delete --delay-updates` of `dist/` to `DEPLOY_PATH`. `--delete` makes `/m` identical to `dist/`, so the workflow refuses a `DEPLOY_PATH` that does not end in `/m`. A Renfe failure or a failed gate stops the run before the deploy step, leaving the live site untouched; bus, light rail and town failures only warn (the gate catches missing stop files).
+
+One-time setup:
+
+1. `ssh-keygen -t ed25519 -f ~/.ssh/madrid_deploy -N '' -C madrid-transit-deploy`
+2. hPanel, Advanced, SSH Access: add `~/.ssh/madrid_deploy.pub`; note host, port (Hostinger usually `65002`) and user.
+3. `ssh-keyscan -p <port> <host> > /tmp/kh`, then connect once to check: `ssh -i ~/.ssh/madrid_deploy -p <port> <user>@<host> 'ls domains/ekult.co.uk/public_html'`.
+4. In this repo: `gh secret set NAP_TOKEN`, `gh secret set SSH_HOST`, `gh secret set SSH_PORT`, `gh secret set SSH_USER`, `gh secret set SSH_KEY < ~/.ssh/madrid_deploy`, `gh secret set SSH_KNOWN_HOSTS < /tmp/kh`, `gh variable set DEPLOY_PATH --body '/home/<user>/domains/ekult.co.uk/public_html/m'`.
 
 ## Not built
 

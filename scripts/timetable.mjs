@@ -291,6 +291,8 @@ async function buildRenfe() {
   const stops = await renfeStops(zip, touched);
   const used = new Set([...trips.values()].map(t => t.serviceId));
   const days = await renfeDays(zip, used);
+  // Renfe is the core data: an empty result fails the build (buses, light rail and towns only warn).
+  if (!trips.size || !days.to) throw new Error('Renfe feed has no Madrid trips or days');
   // An empty file for terminus-only stops, so the client never hits a 404.
   const empty = { r: [], d: [], s: {} };
   return { routes, stops, days, files, empty, trips: trips.size };
