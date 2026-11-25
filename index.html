@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="Madrid" />
+    <link rel="icon" type="image/svg+xml" href="/m/icon.svg" />
+    <link rel="apple-touch-icon" href="/m/apple-touch-icon.png" />
+    <link rel="manifest" href="/m/manifest.webmanifest" />
+    <title>Madrid Transit</title>
+    <style>
+      @font-face {
+        font-family: Selawik;
+        src: url('/m/fonts/selawkl.woff2') format('woff2');
+        font-weight: 300;
+      }
+      body {
+        margin: 0;
+        background: #000;
+      }
+      .splash {
+        display: grid;
+        place-items: center;
+        height: 100dvh;
+      }
+      .splash span {
+        display: grid;
+        place-items: center;
+        width: 120px;
+        height: 120px;
+        background: #e51400;
+        color: #fff;
+        font:
+          300 56px Selawik,
+          'Segoe UI',
+          system-ui,
+          sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="splash"><span aria-hidden="true">mt</span></div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

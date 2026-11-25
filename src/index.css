@@ -1,0 +1,733 @@
+/* Selawik: Microsoft's open-source (OFL) Segoe UI substitute, bundled for offline use. */
+@font-face {
+  font-family: Selawik;
+  src: url('/m/fonts/selawkl.woff2') format('woff2');
+  font-weight: 300;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Selawik;
+  src: url('/m/fonts/selawk.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: Selawik;
+  src: url('/m/fonts/selawksb.woff2') format('woff2');
+  font-weight: 600;
+  font-display: swap;
+}
+
+:root {
+  --bg: #000;
+  --fg: #fff;
+  --muted: #8a8a8a;
+  --bar: #1f1f1f;
+  --accent: #0050ef;
+  --on-accent: #fff;
+  --bus: #647687;
+  --late: #f0a30a;
+  --gutter: 24px;
+  --t-pivot: 48px;
+  --t-title: 32px;
+  --t-item: 24px;
+  --t-body: 17px;
+  --t-small: 14px;
+  --t-tiny: 11px;
+
+  color-scheme: dark;
+}
+
+@media (width < 360px) {
+  :root {
+    --gutter: 16px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Segoe UI', Selawik, system-ui, sans-serif;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.brand {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin: 16px var(--gutter) 0;
+}
+
+/* Pivot: big lowercase headers that loop, active first, the next ones peek in from the right. */
+.views {
+  overflow: hidden;
+  padding-left: var(--gutter);
+}
+
+.views-row {
+  position: relative;
+  display: flex;
+  gap: 24px;
+  width: max-content;
+  animation: pivot-slide 200ms ease-out;
+}
+
+@keyframes pivot-slide {
+  from {
+    transform: translateX(40px);
+    opacity: 0.4;
+  }
+}
+
+.views button {
+  font-size: var(--t-pivot);
+  font-weight: 300;
+  line-height: 1.15;
+  text-transform: lowercase;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.views button[aria-current='true'] {
+  color: var(--fg);
+}
+
+.panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: auto hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.pane {
+  flex: 0 0 100%;
+  min-width: 0;
+  overflow-y: auto;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+  padding: 8px var(--gutter) calc(112px + env(safe-area-inset-bottom));
+}
+
+.turn {
+  transform-origin: left;
+  animation: turnstile-in 250ms ease-out;
+}
+
+@keyframes turnstile-in {
+  from {
+    transform: perspective(800px) rotateY(-70deg);
+    opacity: 0;
+  }
+}
+
+/* Metro tilt: motion.ts sets --rx / --ry / --s while a .tilt element is pressed. */
+.tilt {
+  transition: transform 120ms;
+  transform: perspective(600px) rotateX(var(--rx, 0)) rotateY(var(--ry, 0)) scale(var(--s, 1));
+}
+
+.icon {
+  flex: none;
+  vertical-align: -0.2em;
+}
+
+.title {
+  font-size: var(--t-title);
+  font-weight: 300;
+  text-transform: lowercase;
+  margin: 0 0 16px;
+}
+
+/* Saved stops: a small scrollable row; inner horizontal scroll must not hijack the page swipe. */
+.stops {
+  display: flex;
+  gap: 20px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
+  scrollbar-width: none;
+  margin-bottom: 8px;
+}
+
+.stops button {
+  font-size: var(--t-item);
+  font-weight: 300;
+  text-transform: lowercase;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.stops button[aria-current='true'] {
+  color: var(--fg);
+}
+
+/* Bottom app bar: round outlined icon buttons; "..." reveals the labels and the menu. */
+.appbar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 20;
+  background: var(--bar);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.bar-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 24px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 12px 56px 12px var(--gutter);
+  position: relative;
+}
+
+.bar-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.bar-circle {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 2px solid var(--fg);
+  border-radius: 50%;
+}
+
+.bar-btn:active .bar-circle {
+  background: var(--fg);
+  color: var(--bar);
+}
+
+.bar-label {
+  display: none;
+  font-size: var(--t-tiny);
+  text-transform: lowercase;
+}
+
+.appbar.open .bar-label {
+  display: block;
+}
+
+.bar-more {
+  position: absolute;
+  top: 12px;
+  right: var(--gutter);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 48px;
+}
+
+.bar-menu {
+  list-style: none;
+  margin: 0 auto;
+  padding: 16px var(--gutter) 0;
+  max-width: 720px;
+  animation: menu-up 200ms ease-out;
+}
+
+.bar-menu button {
+  font-size: var(--t-item);
+  text-transform: lowercase;
+  padding: 6px 0;
+}
+
+@keyframes menu-up {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--fg);
+  padding: 4px 12px;
+  min-height: 36px;
+  min-width: 36px;
+  text-transform: lowercase;
+}
+
+.btn:active {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 6px 8px;
+  border: 2px solid var(--fg);
+  background: #fff;
+  color: #000;
+  border-radius: 0;
+}
+
+.results {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px;
+}
+
+.results li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.results li span {
+  flex: 1;
+}
+
+.group {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 24px;
+}
+
+/* Metro tile: big content, small lowercase label bottom-left. Colour = mode. */
+.tile {
+  flex: 0 0 72px;
+  height: 72px;
+  background: var(--tile, var(--bus));
+  color: var(--tile-text, #fff);
+  position: relative;
+  overflow: hidden;
+}
+
+.tile b {
+  position: absolute;
+  inset: 0 0 18px;
+  display: grid;
+  place-items: center;
+  font-size: 34px;
+  font-weight: 300;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.tile small {
+  position: absolute;
+  left: 6px;
+  bottom: 4px;
+  font-size: var(--t-tiny);
+  font-weight: 600;
+  text-transform: lowercase;
+  opacity: 0.9;
+}
+
+.deps {
+  flex: 1;
+  min-width: 0;
+}
+
+.dest {
+  display: block;
+  font-size: var(--t-item);
+  font-weight: 300;
+  text-transform: lowercase;
+  margin-bottom: 2px;
+}
+
+.dep {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--t-body);
+  color: var(--muted);
+}
+
+.dep .via {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dep .late {
+  color: var(--late);
+}
+
+.dep .left {
+  margin-left: auto;
+  color: var(--fg);
+  font-size: var(--t-item);
+  font-weight: 300;
+}
+
+.route {
+  list-style: none;
+  margin: 0 0 8px 35px;
+  padding: 4px 0 4px 20px;
+  border-left: 3px solid var(--accent);
+}
+
+.route li {
+  padding: 3px 0;
+  color: var(--muted);
+}
+
+.status {
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin-top: 16px;
+}
+
+/* Route planner */
+.field {
+  margin: 12px 0;
+}
+
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 4px 0 8px;
+}
+
+.chips button {
+  font-size: var(--t-item);
+  font-weight: 300;
+  text-transform: lowercase;
+  color: var(--muted);
+}
+
+.chips button[aria-current='true'] {
+  color: var(--fg);
+}
+
+.saved-route {
+  flex: 1;
+  text-align: left;
+  font-size: var(--t-body);
+  font-weight: 300;
+  text-transform: lowercase;
+}
+
+.trip {
+  margin-bottom: 24px;
+}
+
+.trip-head {
+  margin: 0 0 8px;
+  font-size: var(--t-item);
+  font-weight: 300;
+}
+
+.trip-head span {
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+.leg {
+  display: flex;
+  width: 100%;
+  text-align: left;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  color: var(--muted);
+}
+
+.leg strong {
+  color: var(--fg);
+  font-weight: 400;
+}
+
+.leg .late {
+  color: var(--late);
+}
+
+.walk {
+  margin-left: 50px;
+  font-style: italic;
+}
+
+.tile.sm {
+  flex: 0 0 40px;
+  height: 40px;
+}
+
+.tile.sm b {
+  inset: 0;
+  font-size: 18px;
+}
+
+.results li .dist {
+  color: var(--muted);
+  font-size: var(--t-small);
+}
+
+.route.sm {
+  margin-left: 19px;
+}
+
+.headway {
+  display: block;
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.acc {
+  color: var(--fg);
+  margin-left: 2px;
+}
+
+.acc.part {
+  color: var(--muted);
+}
+
+.repl {
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: var(--t-tiny);
+  color: #000;
+  background: var(--late);
+  text-transform: lowercase;
+}
+
+/* Metro refresh progress: thin bar at the top edge, counting down to the next refresh; flying dots while loading */
+.refresh {
+  position: fixed;
+  top: env(safe-area-inset-top, 0);
+  left: 0;
+  right: 0;
+  height: 3px;
+  overflow: hidden;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.refresh span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  animation: wp-fill linear forwards;
+}
+
+.refresh i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 6px;
+  height: 3px;
+  background: var(--accent);
+  opacity: 0;
+  animation: wp-dot 2.4s cubic-bezier(0.2, 0.8, 0.8, 0.2) infinite;
+}
+
+@keyframes wp-fill {
+  from {
+    transform: scaleX(0);
+  }
+
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes wp-dot {
+  0% {
+    transform: translateX(-10px);
+    opacity: 1;
+  }
+
+  85% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(100vw);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tilt {
+    transition: none;
+    transform: none;
+  }
+
+  .turn,
+  .bar-menu,
+  .views-row {
+    animation: none;
+  }
+
+  .refresh span,
+  .refresh i {
+    animation: none;
+  }
+
+  .refresh span {
+    transform: none;
+    opacity: 0.4;
+  }
+
+  .refresh i {
+    left: 0;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
+/* Service alerts, cancellations, platform changes */
+.alert {
+  border-left: 4px solid var(--late);
+  padding: 4px 0 4px 10px;
+  margin: 0 0 10px;
+}
+
+.alert button {
+  text-align: left;
+  width: 100%;
+}
+
+.alert button[aria-expanded='false'] span {
+  display: block;
+  max-height: 3.2em;
+  overflow: hidden;
+}
+
+.alert p {
+  margin: 6px 0 0;
+  font-size: var(--t-small);
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.warn-mark {
+  color: var(--late);
+  margin-left: 8px;
+}
+
+.tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  font-size: var(--t-tiny);
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+.tag.warn {
+  color: #000;
+  background: var(--late);
+}
+
+.tag.bad {
+  color: #fff;
+  background: #e51400;
+}
+
+.dep .tag.bad {
+  margin-left: auto;
+}
+
+.cancelled .time,
+.cancelled .left {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.leg.cancelled strong {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.quay-old {
+  color: var(--muted);
+}
+
+.quay-new {
+  color: var(--late);
+  font-weight: 700;
+}
+
+/* Settings */
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 32px;
+}
+
+.swatch {
+  aspect-ratio: 1;
+  background: var(--swatch);
+}
+
+.swatch[aria-pressed='true'] {
+  outline: 3px solid var(--fg);
+  outline-offset: 2px;
+}
+
+.about {
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin: 0;
+}
