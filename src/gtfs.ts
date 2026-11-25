@@ -23,24 +23,31 @@ export type RouteInfo = {
   metro?: boolean;
 };
 export type RouteMap = Record<string, RouteInfo>;
-export type DaysFile = { from: string; to: string; days: Record<string, string[]> };
+// updated: date of Renfe's zip (HTTP Last-Modified, else download date), yyyymmdd.
+export type DaysFile = {
+  from: string;
+  to: string;
+  updated?: string;
+  days: Record<string, string[]>;
+};
 // Per-stop timetable file: route ids (r), destination stop ids (d) and, per service id, rows of
-// [secs since service-day midnight (may exceed 24h), trip id minus the service-id prefix, r index, d index].
+// [secs since service-day midnight (may exceed 24h), trip id minus the service-id prefix, r index, d index,
+// pattern index into the route's route/<routeId>.json].
 export type RenfeFile = {
   r: string[];
   d: string[];
-  s: Record<string, [number, string, number, number][]>;
+  s: Record<string, [number, string, number, number, number?][]>;
 };
 // Bus stop file (timetable only): route ids (r), headsigns (h), calendars (c: weekday bitmask with
 // bit 0 = Sunday, start and end yyyymmdd, added and removed yyyymmdd dates) and rows
-// [secs since service-day midnight (may exceed 24h), c index, r index, h index], sorted by secs.
+// [secs since service-day midnight (may exceed 24h), c index, r index, h index, pattern index], sorted by secs.
 export type BusCalendar = [number, number, number, number[], number[]];
 export type BusFile = {
   kind: 'bus';
   r: string[];
   h: string[];
   c: BusCalendar[];
-  d: [number, number, number, number][];
+  d: [number, number, number, number, number?][];
 };
 export type StopFile = RenfeFile | BusFile;
 export const isBus = (f: StopFile | null | undefined): f is BusFile =>
@@ -62,6 +69,7 @@ export type Departure = {
   cancelled: boolean;
   live: boolean; // from CRTM times or a GTFS-RT trip update, not the static timetable
   distM?: number; // EMT only: distance of the bus to the stop, metres
+  pi?: number; // timetable rows: index of the trip's stop pattern in its route file
 };
 
 export type TripUpdates = {
@@ -180,7 +188,7 @@ function dayDepartures(
   serviceId: string,
 ): Departure[] {
   const out: Departure[] = [];
-  for (const [secs, suffix, ri, di] of file.s[serviceId] ?? []) {
+  for (const [secs, suffix, ri, di, pi] of file.s[serviceId] ?? []) {
     const planned = madridTime(day, secs);
     const routeId = file.r[ri];
     const r = routes[routeId];
@@ -192,6 +200,7 @@ function dayDepartures(
       color: r.color,
       text: r.text,
       dest: file.d[di],
+      pi,
       planned,
       expected: planned,
       cancelled: false,
@@ -235,7 +244,7 @@ function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Depart
   const to = (now.getTime() + HORIZON_MS - midnight) / 1000 + 3600;
   const active = file.c.map(c => busActive(c, day));
   const out: Departure[] = [];
-  file.d.forEach(([secs, ci, ri, hsi], i) => {
+  file.d.forEach(([secs, ci, ri, hsi, pi], i) => {
     const r = routes[file.r[ri]];
     if (secs < from || secs > to || !active[ci] || !r) return;
     const planned = madridTime(day, secs);
@@ -249,6 +258,7 @@ function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Depart
       dest: file.h[hsi],
       bus: true,
       tram: r.tram,
+      pi,
       planned,
       expected: planned,
       cancelled: false,
@@ -951,3 +961,84 @@ console.assert(ddmm('20261224') === '24.12.', 'ddmm');
 
 export const daysUntil = (yyyymmdd: string, now: Date) =>
   Math.floor((madridTime(yyyymmdd, 0).getTime() - now.getTime()) / DAY_MS);
+
+// Stop patterns of one route (route/<routeId>.json): unique stop sequences, each a list of
+// [stopId, offsetSecs from the first stop].
+export type Pattern = [string, number][];
+export type RouteFile = { p: Pattern[] };
+export type StopTime = { id: string; at: Date };
+
+const stopIndex = (p: Pattern, stopId: string) => p.findIndex(x => x[0] === stopId);
+const stopsAfter = (p: Pattern, stopId: string) => {
+  const i = stopIndex(p, stopId);
+  return i < 0 ? 0 : p.length - 1 - i;
+};
+
+// Accent-insensitive, either name may contain the other ("PINAR DE CHAMARTIN" vs "Pinar de Chamartín").
+const sameName = (a: string, b: string) => {
+  const x = fold(a);
+  const y = fold(b);
+  return !!x && !!y && (x === y || x.includes(y) || y.includes(x));
+};
+
+// Pattern for live rows that carry no pattern index (Metro, EMT, CRTM): among the patterns that
+// still have stops after `stopId`, the longest whose last stop is named like the destination,
+// else the longest. Returns an index, or -1 when no pattern contains the stop.
+export function pickPattern(
+  patterns: Pattern[],
+  stopId: string,
+  dest: string,
+  nameOf: (id: string) => string | undefined,
+): number {
+  const longest = (ok: (p: Pattern) => boolean) => {
+    let best = -1;
+    let most = 0;
+    patterns.forEach((p, i) => {
+      const n = stopsAfter(p, stopId);
+      if (n > most && ok(p)) [best, most] = [i, n];
+    });
+    return best;
+  };
+  const named = dest ? longest(p => sameName(nameOf(p.at(-1)?.[0] ?? '') ?? '', dest)) : -1;
+  return named >= 0 ? named : longest(() => true);
+}
+
+// The stops after `stopId` with estimated times: `at` is when the vehicle leaves `stopId`
+// (planned, live or estimated), later stops add the pattern's offset difference.
+export function nextStops(p: Pattern, stopId: string, at: Date): StopTime[] {
+  const i = stopIndex(p, stopId);
+  if (i < 0) return [];
+  return p
+    .slice(i + 1)
+    .map(([id, off]) => ({ id, at: new Date(at.getTime() + (off - p[i][1]) * 1000) }));
+}
+console.assert(
+  (() => {
+    const long: Pattern = [
+      ['a', 0],
+      ['b', 60],
+      ['c', 180],
+      ['d', 300],
+    ];
+    const short: Pattern = [
+      ['a', 0],
+      ['b', 90],
+      ['c', 200],
+    ];
+    const names: Record<string, string> = { c: 'Calle C', d: 'DÉ' };
+    const nameOf = (id: string) => names[id];
+    const t = nextStops(long, 'b', new Date('2026-11-25T09:00:00Z'));
+    return (
+      t.map(x => x.id).join() === 'c,d' &&
+      t[0].at.toISOString() === '2026-11-25T09:02:00.000Z' &&
+      t[1].at.toISOString() === '2026-11-25T09:04:00.000Z' &&
+      nextStops(long, 'zz', new Date()).length === 0 &&
+      pickPattern([short, long], 'a', 'de', nameOf) === 1 &&
+      pickPattern([short, long], 'a', 'calle c', nameOf) === 0 &&
+      pickPattern([short, long], 'a', 'nowhere', nameOf) === 1 &&
+      pickPattern([short, long], 'd', '', nameOf) === -1 &&
+      pickPattern([short, long], 'zz', '', nameOf) === -1
+    );
+  })(),
+  'nextStops offsets, pickPattern: destination match, longest fallback, none',
+);

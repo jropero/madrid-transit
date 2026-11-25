@@ -1,8 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { loadTimetable } from './data.ts';
+import { ddmm } from './gtfs.ts';
 import { ACCENTS, applyAccent, loadAccent, type AccentName } from './accent.ts';
 
 export default function Settings() {
   const [accent, setAccent] = useState<AccentName>(loadAccent);
+  const [updated, setUpdated] = useState('');
+  useEffect(() => {
+    loadTimetable().then(
+      tt => setUpdated(tt.days.updated ?? ''),
+      () => undefined,
+    );
+  }, []);
   return (
     <>
       <h2 className="title">color de acento</h2>
@@ -23,19 +32,36 @@ export default function Settings() {
       </div>
       <h2 className="title">acerca de</h2>
       <p className="about">
-        Horarios de Cercanías Madrid y retrasos en tiempo real, con datos abiertos de Renfe
-        (GTFS y GTFS-Realtime, data.renfe.com). Horarios de autobuses interurbanos del Consorcio
-        Regional de Transportes de Madrid a través del Punto de Acceso Nacional. Metro Ligero y
-        Tranvía de Parla: datos abiertos del CRTM. Tiempos de paso de autobuses y tranvías: CRTM
-        (crtm.es), con el horario como respaldo. Autobuses EMT: EMT Madrid MobilityLabs (datos
-        en vivo). Municipios de las paradas: datos abiertos del CRTM (datos.crtm.es).
-        Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons (MIT).
+        Cercanías: horarios y retrasos en tiempo real de Renfe. Autobuses interurbanos, Metro,
+        Metro Ligero y Tranvía de Parla: horarios y tiempos de paso del CRTM; municipios de los
+        datos abiertos del CRTM. Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons
+        (MIT).
+      </p>
+      <p className="about">
+        Origen de los datos:{' '}
+        <a href="https://data.renfe.com/legal" target="_blank" rel="noopener">
+          Renfe Operadora
+        </a>
+        {updated && ` · horario actualizado ${ddmm(updated).slice(0, -1)}`}. Aplicación no
+        oficial, sin relación con Renfe.
       </p>
       <p className="about">
         Powered by{' '}
-        <a href="https://www.transportes.gob.es/" target="_blank" rel="noreferrer">
+        <a href="http://www.crtm.es/" target="_blank" rel="noopener">
+          CRTM
+        </a>
+        . Datos del CRTM explotados por esta aplicación (
+        <a href="https://www.crtm.es/licencia-de-uso" target="_blank" rel="noopener">
+          licencia
+        </a>
+        ); el CRTM no patrocina esta aplicación.
+      </p>
+      <p className="about">
+        Datos: EMT Madrid MobilityLabs. Powered by{' '}
+        <a href="https://www.transportes.gob.es/" target="_blank" rel="noopener">
           MITRAMS
         </a>
+        .
       </p>
     </>
   );

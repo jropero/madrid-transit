@@ -1,7 +1,7 @@
 // Offline shell for /m/. Same-origin GETs only; rt.php (live data) is never cached here
 // (the app keeps its own last-known copy), the timetable JSON in data/ is cached on first use.
 // shortcut: old hashed assets linger until CACHE is bumped.
-const CACHE = "madrid-transit-v3";
+const CACHE = "madrid-transit-v4";
 const BASE = "/m/";
 const SHELL = ["", "index.html", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "apple-touch-icon.png", "fonts/selawkl.woff2", "fonts/selawk.woff2", "fonts/selawksb.woff2"].map((f) => BASE + f);
 

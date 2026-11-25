@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppBar from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
+import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
 import Alerts, { AccessMark, AlertMark } from './Alerts.tsx';
 import {
@@ -302,35 +303,48 @@ const modeLabel = (d: Departure) => {
   return d.bus ? 'bus' : 'cercanías';
 };
 
+// A line and its next departures; tapping it lists the remaining stops of the next one.
 function LineGroup({
   list,
   destName,
+  stopId,
   hasAlert,
   now,
 }: {
   list: Departure[];
   destName: string;
+  stopId: string;
   hasAlert: boolean;
   now: number;
 }) {
+  const [open, setOpen] = useState(false);
   const head = list[0];
   const tile = { '--tile': head.color, '--tile-text': head.text } as React.CSSProperties;
+  const panel = `next-${head.routeId}-${head.tripId}`;
   return (
-    <section className="group">
-      <span className="tile" style={tile}>
-        <b>{head.line}</b>
-        <small>{modeLabel(head)}</small>
-      </span>
-      <span className="deps">
-        <span className="dest">
-          {short(destName)}
-          <AlertMark on={hasAlert} />
-          {list.some(d => d.live) && <span className="live">en vivo</span>}
+    <section className="line">
+      <button
+        className="group tilt"
+        aria-expanded={open}
+        aria-controls={open ? panel : undefined}
+        onClick={() => setOpen(!open)}
+      >
+        <span className="tile" style={tile}>
+          <b>{head.line}</b>
+          <small>{modeLabel(head)}</small>
         </span>
-        {list.slice(0, MAX_PER_GROUP).map(d => (
-          <DepartureRow key={d.tripId} d={d} now={now} />
-        ))}
-      </span>
+        <span className="deps">
+          <span className="dest">
+            {short(destName)}
+            <AlertMark on={hasAlert} />
+            {list.some(d => d.live) && <span className="live">en vivo</span>}
+          </span>
+          {list.slice(0, MAX_PER_GROUP).map(d => (
+            <DepartureRow key={d.tripId} d={d} now={now} />
+          ))}
+        </span>
+      </button>
+      {open && <NextStops dep={head} stopId={stopId} id={panel} />}
     </section>
   );
 }
@@ -675,8 +689,9 @@ function Departures({
 
       {groups.map(([key, list]) => (
         <LineGroup
-          key={key}
+          key={`${selected.id}|${key}`}
           list={list}
+          stopId={selected.id}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
           hasAlert={alerts.some(a => a.routeIds.includes(list[0].routeId))}
           now={now}

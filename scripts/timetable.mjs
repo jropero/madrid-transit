@@ -104,6 +104,17 @@ console.assert(
   'splitCsv trims and keeps quoted commas',
 );
 
+// Equirectangular approximation (same as src/gtfs.ts).
+const metres = (a, b) => {
+  const k = 111_320;
+  const x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180));
+  return Math.round(Math.hypot(x, (b.lat - a.lat) * k));
+};
+console.assert(
+  Math.abs(metres({ lat: 40.4065, lon: -3.6893 }, { lat: 40.4723, lon: -3.6826 }) - 7300) < 400,
+  'metres',
+);
+
 // "06:35:00" -> seconds since service-day midnight (may exceed 24h).
 export const toSecs = t => {
   const [h, m, s] = t.split(':').map(Number);
@@ -139,12 +150,33 @@ async function download(feed, headers = {}) {
   if (!res.ok || !res.body) throw new Error(`download failed: HTTP ${res.status}`);
   await pipeline(Readable.fromWeb(res.body), createWriteStream(`${feed.zip}.part`));
   renameSync(`${feed.zip}.part`, feed.zip);
+  return res.headers.get('last-modified');
+}
+
+// Madrid calendar date (yyyymmdd) of a Date.
+const madridYmd = d =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid' }).format(d).replaceAll('-', '');
+console.assert(madridYmd(new Date('2026-11-25T23:30:00Z')) === '20261126', 'madridYmd');
+
+// Renfe's zip date (HTTP Last-Modified, else the download date), kept next to the zip so a
+// cached zip keeps reporting it. Shown in the app as "horario actualizado".
+const UPDATED = `${RENFE.zip}.updated`;
+function renfeUpdated() {
+  try {
+    const v = readFileSync(UPDATED, 'utf8').trim();
+    if (/^\d{8}$/.test(v)) return v;
+  } catch {
+    // no sidecar: fall back to the zip's own date
+  }
+  return madridYmd(statSync(RENFE.zip).mtime);
 }
 
 async function ensureRenfe() {
   mkdirSync(CACHE, { recursive: true });
-  if (fresh(RENFE.zip)) console.log('using cached Renfe zip');
-  else await download(RENFE);
+  if (fresh(RENFE.zip)) return console.log('using cached Renfe zip');
+  const lm = await download(RENFE);
+  const date = lm && !Number.isNaN(Date.parse(lm)) ? new Date(lm) : new Date();
+  await writeFile(UPDATED, madridYmd(date));
 }
 
 // Request headers of a feed; null when it needs a NAP token that is missing.
@@ -210,12 +242,58 @@ const indexOf = (arr, v) => {
 };
 const coord = v => Number(Number(v).toFixed(5));
 
+// Stop patterns per route: the unique stop sequences with offsets (seconds) from the first stop.
+// pats.add(routeId, stops) -> pattern index; pats.routes: routeId -> { list, index }.
+function makePatterns() {
+  const routes = new Map();
+  return {
+    routes,
+    add(routeId, stops) {
+      const r = routes.get(routeId) ?? { list: [], index: new Map() };
+      routes.set(routeId, r);
+      const key = stops.join();
+      const known = r.index.get(key);
+      if (known !== undefined) return known;
+      r.list.push(stops);
+      r.index.set(key, r.list.length - 1);
+      return r.list.length - 1;
+    },
+  };
+}
+
+// [[stopId, offsetSecs]] of a trip's sorted rows [[seq, secs, stopId]]; consecutive repeats of
+// one stop (after id mapping) collapse into the first.
+function patternOf(list, mapId = id => id) {
+  const out = [];
+  const first = list[0][1];
+  for (const [, secs, id] of list) {
+    const stop = mapId(id);
+    if (stop && stop !== out.at(-1)?.[0]) out.push([stop, secs - first]);
+  }
+  return out;
+}
+console.assert(
+  JSON.stringify(
+    patternOf(
+      [
+        [1, 100, 'a'],
+        [2, 160, 'b'],
+        [3, 220, 'b2'],
+      ],
+      id => (id === 'b2' ? 'b' : id),
+    ),
+  ) === '[["a",0],["b",60]]',
+  'patternOf offsets and collapse',
+);
+
 // Per-stop trip rows: sorted by departure, the last stop of each trip is dropped (no departure
-// there). `byTrip` maps tripId -> [[seq, secs, stopId]].
-function* tripCalls(byTrip) {
+// there). `byTrip` maps tripId -> [[seq, secs, stopId]]. `patOf(tripId, list)` gives the trip's
+// pattern index, yielded as `pi` with every row.
+function* tripCalls(byTrip, patOf) {
   for (const [tripId, list] of byTrip) {
     list.sort((a, b) => a[0] - b[0]);
-    for (const [, secs, stopId] of list.slice(0, -1)) yield { tripId, list, secs, stopId };
+    const pi = patOf(tripId, list);
+    for (const [, secs, stopId] of list.slice(0, -1)) yield { tripId, list, secs, stopId, pi };
   }
 }
 
@@ -281,15 +359,17 @@ async function renfeDays(zip, usedServices) {
   return { days, from: keys[0], to: keys.at(-1) };
 }
 
-// Per stop, compact: { r: routeIds, d: destStopIds, s: { serviceId: [[secs, tripSuffix, ri, di]] } }.
+// Per stop, compact: { r: routeIds, d: destStopIds, s: { serviceId: [[secs, tripSuffix, ri, di, pi]] } }
+// (pi = index into the route's patterns in route/<routeId>.json).
 // The trip id is stored without its service-id prefix (the client re-adds it).
-function renfeFiles(trips, byTrip) {
+function renfeFiles(trips, byTrip, pats) {
   const files = new Map();
-  for (const { tripId, list, secs, stopId } of tripCalls(byTrip)) {
+  const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
+  for (const { tripId, list, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
     const { routeId, serviceId } = trips.get(tripId);
     const suffix = tripId.startsWith(serviceId) ? tripId.slice(serviceId.length) : `!${tripId}`;
     const f = files.get(stopId) ?? { r: [], d: [], s: {} };
-    const row = [secs, suffix, indexOf(f.r, routeId), indexOf(f.d, list.at(-1)[2])];
+    const row = [secs, suffix, indexOf(f.r, routeId), indexOf(f.d, list.at(-1)[2]), pi];
     (f.s[serviceId] ??= []).push(row);
     files.set(stopId, f);
   }
@@ -321,7 +401,8 @@ async function buildRenfe() {
   const routes = await renfeRoutes(zip);
   const trips = await renfeTrips(zip, routes);
   const byTrip = await loadByTrip(zip, trips);
-  const files = renfeFiles(trips, byTrip);
+  const pats = makePatterns();
+  const files = renfeFiles(trips, byTrip, pats);
   // Every stop a Madrid trip touches, termini included (they name destinations).
   const touched = new Set([...byTrip.values()].flatMap(list => list.map(r => r[2])));
   const stops = await renfeStops(zip, touched);
@@ -331,7 +412,8 @@ async function buildRenfe() {
   if (!trips.size || !days.to) throw new Error('Renfe feed has no Madrid trips or days');
   // An empty file for terminus-only stops, so the client never hits a 404.
   const empty = { r: [], d: [], s: {} };
-  return { routes, stops, days, files, empty, trips: trips.size };
+  days.updated = renfeUpdated();
+  return { routes, stops, days, files, empty, pats, trips: trips.size };
 }
 
 // ---------------------------------------------------------------- Buses
@@ -398,19 +480,20 @@ async function busCalendars(zip, used) {
   return cals;
 }
 
-// Per stop: { kind: 'bus', r: routeIds, h: headsigns, c: [calendars], d: [[secs, ci, ri, hi]] }.
+// Per stop: { kind: 'bus', r: routeIds, h: headsigns, c: [calendars], d: [[secs, ci, ri, hi, pi]] }.
 // Calendars are inlined per stop and deduplicated, so the client never needs the whole table.
-function busFiles(trips, byTrip, cals) {
+function busFiles(trips, byTrip, cals, pats) {
   const files = new Map();
+  const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
   const calKey = new Map(); // serviceId -> JSON of its calendar
   for (const [id, cal] of cals) calKey.set(id, JSON.stringify(cal));
-  for (const { tripId, secs, stopId } of tripCalls(byTrip)) {
+  for (const { tripId, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
     const { routeId, serviceId, head } = trips.get(tripId);
     const f = files.get(stopId) ?? { kind: 'bus', r: [], h: [], c: [], d: [], keys: [] };
     const key = calKey.get(serviceId) ?? JSON.stringify(EMPTY_CAL());
     const ci = indexOf(f.keys, key);
     if (ci === f.c.length) f.c.push(JSON.parse(key));
-    f.d.push([secs, ci, indexOf(f.r, routeId), indexOf(f.h, head)]);
+    f.d.push([secs, ci, indexOf(f.r, routeId), indexOf(f.h, head), pi]);
     files.set(stopId, f);
   }
   for (const f of files.values()) {
@@ -447,9 +530,10 @@ async function buildCrtm(feed) {
   const used = new Set([...trips.values()].map(t => t.serviceId));
   const cals = await busCalendars(zip, used);
   const byTrip = await loadByTrip(zip, trips);
-  const files = busFiles(trips, byTrip, cals);
+  const pats = makePatterns();
+  const files = busFiles(trips, byTrip, cals, pats);
   const stops = await busStops(zip, files, feed);
-  return { routes, stops, files, trips: trips.size };
+  return { routes, stops, files, pats, trips: trips.size };
 }
 
 // ---------------------------------------------------------------- Metro de Madrid
@@ -488,14 +572,113 @@ async function metroStops(zip) {
   return stops;
 }
 
+const MERGE_M = 300;
+const foldName = n =>
+  n.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+console.assert(foldName(' Núñez  de Balboa') === 'nunez de balboa', 'foldName');
+
+// The Metro GTFS has one station record per line at an interchange, but CRTM answers every
+// line's trains for any of them. Stations with the same normalised name within 300 m become one:
+// the lowest code is kept (as id), wa is any, the town comes with the kept record.
+// Returns { stops, alias } (alias: dropped stop id -> kept stop id).
+function mergeMetro(stops) {
+  const byName = Map.groupBy(stops, s => foldName(s.name));
+  const alias = new Map();
+  const kept = [...byName.values()].flatMap(group => mergeGroup(group, alias));
+  return { stops: kept, alias };
+}
+
+// One name's stations -> the kept ones (one per cluster within 300 m); fills `alias`.
+function mergeGroup(group, alias) {
+  group.sort((a, b) => Number(a.code) - Number(b.code) || a.id.localeCompare(b.id));
+  const heads = [];
+  for (const s of group) {
+    const head = heads.find(h => metres(h, s) <= MERGE_M);
+    if (!head) heads.push(s);
+    else {
+      head.wa ||= s.wa;
+      alias.set(s.id, head.id);
+    }
+  }
+  return heads;
+}
+console.assert(
+  (() => {
+    const s = (id, code, lat, wa) => ({ id, code, name: 'Sol', lat, lon: -3.7, wa });
+    const m = mergeMetro([
+      s('b', '35', 40.4, false),
+      s('a', '12', 40.4001, true),
+      s('c', '9', 41, false),
+    ]);
+    return (
+      m.stops.length === 2 &&
+      m.alias.get('b') === 'a' &&
+      m.stops.find(x => x.id === 'a').wa &&
+      !m.alias.has('c')
+    );
+  })(),
+  'mergeMetro merges same name within 300 m, keeps the lowest code',
+);
+
+// Streams stop_times.txt and collects one pattern per unique stop sequence and route, without
+// keeping the file in memory (EMT's is ~100 MB). `routeOf(tripId)` -> route id (or undefined to
+// skip the trip), `mapId(stopId)` -> output stop id (or falsy to drop the call). Rows of one trip
+// are expected to be contiguous.
+async function streamPatterns(zip, routeOf, mapId) {
+  const pats = makePatterns();
+  let tripId = null;
+  let list = [];
+  const flush = () => {
+    const routeId = tripId && routeOf(tripId);
+    if (routeId && list.length > 1) {
+      list.sort((a, b) => a[0] - b[0]);
+      const pattern = patternOf(list, mapId);
+      if (pattern.length > 1) pats.add(routeId, pattern);
+    }
+    list = [];
+  };
+  for await (const s of rows(zip, 'stop_times.txt')) {
+    if (s.trip_id !== tripId) {
+      flush();
+      tripId = s.trip_id;
+    }
+    if (routeOf(tripId)) {
+      list.push([
+        Number(s.stop_sequence),
+        toSecs(s.departure_time || s.arrival_time),
+        s.stop_id,
+      ]);
+    }
+  }
+  flush();
+  return pats;
+}
+
+// trip_id -> route id (through `routeKey(route_id)`; falsy = skip) from trips.txt.
+async function tripRoutes(zip, routeKey) {
+  const map = new Map();
+  for await (const t of rows(zip, 'trips.txt')) {
+    const key = routeKey(t.route_id);
+    if (key) map.set(t.trip_id, key);
+  }
+  return map;
+}
+
 // Never fails the build: a missing or broken Metro feed only drops Metro stops.
 async function buildMetro() {
   try {
     if (!(await ensureFeed(METRO))) return null;
     const routes = await metroRoutes(METRO.zip);
-    const stops = await metroStops(METRO.zip);
-    if (!stops.length) throw new Error('no stops');
-    return { routes, stops };
+    const all = await metroStops(METRO.zip);
+    if (!all.length) throw new Error('no stops');
+    const { stops, alias } = mergeMetro(all);
+    const ofTrip = await tripRoutes(METRO.zip, id => routes[id] && id);
+    const pats = await streamPatterns(
+      METRO.zip,
+      id => ofTrip.get(id),
+      id => alias.get(id) ?? (id.startsWith('par_4_') ? id : null),
+    );
+    return { routes, stops, merged: alias.size, pats };
   } catch (err) {
     console.warn(`Metro step failed (${err.message}): skipping`);
     return null;
@@ -505,10 +688,13 @@ async function buildMetro() {
 // ---------------------------------------------------------------- EMT city buses
 
 // Routes keyed `emt_<short name>` (what the client builds from the live `line`).
+// Also returns `keys`: GTFS route_id -> that key (stop patterns are collected per key).
 async function emtRoutes(zip) {
   const routes = {};
+  const keys = new Map();
   for await (const r of rows(zip, 'routes.txt')) {
     if (!r.route_short_name) continue;
+    keys.set(r.route_id, `emt_${r.route_short_name}`);
     routes[`emt_${r.route_short_name}`] = {
       line: r.route_short_name,
       color: `#${r.route_color || EMT.color}`,
@@ -516,7 +702,7 @@ async function emtRoutes(zip) {
       name: r.route_long_name,
     };
   }
-  return routes;
+  return { routes, keys };
 }
 
 // stop_id is the EMT stop number (digits only; anything else is dropped).
@@ -543,10 +729,16 @@ async function buildEmt() {
   try {
     if (!(await ensureFeed({ ...EMT, auth: false }))) return null;
     const zip = EMT.zip;
-    const routes = await emtRoutes(zip);
+    const { routes, keys } = await emtRoutes(zip);
     const stops = await emtStops(zip);
     if (!stops.length) throw new Error('no stops');
-    return { routes, stops };
+    const ofTrip = await tripRoutes(zip, id => keys.get(id));
+    const pats = await streamPatterns(
+      zip,
+      id => ofTrip.get(id),
+      id => (/^\d{1,6}$/.test(id) ? `emt_${id}` : null),
+    );
+    return { routes, stops, pats };
   } catch (err) {
     console.warn(`EMT step failed (${err.message}): skipping`);
     return null;
@@ -677,17 +869,6 @@ console.assert(
   'colliding stop codes keep the town of their own feed',
 );
 
-// Equirectangular approximation (same as src/gtfs.ts).
-const metres = (a, b) => {
-  const k = 111_320;
-  const x = (b.lon - a.lon) * k * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180));
-  return Math.round(Math.hypot(x, (b.lat - a.lat) * k));
-};
-console.assert(
-  Math.abs(metres({ lat: 40.4065, lon: -3.6893 }, { lat: 40.4723, lon: -3.6826 }) - 7300) < 400,
-  'metres',
-);
-
 // ---------------------------------------------------------------- Output
 
 const kb = n => `${(n / 1024).toFixed(0)} KB`;
@@ -710,6 +891,21 @@ async function writeStopFiles(stops, renfe, crtm) {
   }
 }
 
+// route/<routeId>.json = { p: [[[stopId, offsetSecs], ...], ...] }: the unique stop patterns of
+// each route, from every feed. Route ids that are not plain file names are skipped.
+async function writeRouteFiles(feeds) {
+  mkdirSync(`${OUT}route`, { recursive: true });
+  let n = 0;
+  for (const f of feeds.filter(Boolean)) {
+    for (const [routeId, { list }] of f.pats.routes) {
+      if (!/^[\w.-]{1,40}$/.test(routeId)) continue;
+      await writeFile(`${OUT}route/${routeId}.json`, JSON.stringify({ p: list }));
+      n++;
+    }
+  }
+  return n;
+}
+
 const crtmLine = (name, f) =>
   f
     ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
@@ -728,7 +924,7 @@ function report(renfe, bus, ml, metro, emt, stops, sz) {
   console.log(crtmLine('light rail', ml));
   console.log(
     metro
-      ? `Metro: routes ${Object.keys(metro.routes).length}, stations ${metro.stops.length}`
+      ? `Metro: routes ${Object.keys(metro.routes).length}, stations ${metro.stops.length} (${metro.merged} duplicates merged)`
       : 'Metro: skipped',
   );
   console.log(
@@ -738,6 +934,11 @@ function report(renfe, bus, ml, metro, emt, stops, sz) {
   );
   console.log(
     `stops.json ${kb(sz.stops.raw)} raw, ${kb(sz.stops.gz)} gzip (${stops.length} stops)`,
+  );
+  const rf = readdirSync(`${OUT}route`).map(f => [f, statSync(`${OUT}route/${f}`).size]);
+  const [rBig, rBigSize] = rf.reduce((a, b) => (b[1] > a[1] ? b : a));
+  console.log(
+    `route files ${rf.length}, total ${kb(rf.reduce((n, [, s]) => n + s, 0))}, largest ${rBig} ${kb(rBigSize)}`,
   );
   console.log(
     `per-stop files ${files.length}, total ${kb(total)}, largest ${bigName} ${kb(bigSize)} raw, ${kb(big.gz)} gzip`,
@@ -776,6 +977,7 @@ async function main() {
   });
   await writeJson('days.json', renfe.days);
   await writeStopFiles(stops, renfe, [bus, ml].filter(Boolean));
+  await writeRouteFiles([renfe, bus, ml, metro, emt]);
   report(renfe, bus, ml, metro, emt, stops, sz);
 }
 

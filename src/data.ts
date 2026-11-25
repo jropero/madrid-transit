@@ -4,6 +4,7 @@ import type {
   AlertFeed,
   CrtmJson,
   DaysFile,
+  RouteFile,
   EmtJson,
   StopFile,
   RouteMap,
@@ -47,6 +48,23 @@ export const loadTimetable = () =>
 const allStopsMemo = new Map<string, Promise<Stop[]>>();
 export const loadAllStops = () =>
   memo(allStopsMemo, 'all', () => getJson<Stop[]>(`${base}data/stops.json`));
+
+// Stop id -> name over the full list (names of the next stops of a line).
+const namesMemo = new Map<string, Promise<Map<string, string>>>();
+export const loadStopNames = () =>
+  memo(
+    namesMemo,
+    'all',
+    async () => new Map((await loadAllStops()).map(s => [s.id, s.name] as const)),
+  );
+
+// Stop patterns of one route, loaded the first time its line is opened (the service worker
+// keeps a copy for offline).
+const routeMemo = new Map<string, Promise<RouteFile>>();
+export const loadRoute = (routeId: string) =>
+  memo(routeMemo, routeId, () =>
+    getJson<RouteFile>(`${base}data/route/${encodeURIComponent(routeId)}.json`),
+  );
 
 const perStop = new Map<string, Promise<StopFile>>();
 export const loadStopDeps = (id: string) =>

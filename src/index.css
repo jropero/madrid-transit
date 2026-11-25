@@ -341,12 +341,40 @@ button:disabled {
   flex: 1;
 }
 
+.line {
+  margin-bottom: 24px;
+}
+
 .group {
   display: flex;
   gap: 12px;
   width: 100%;
   text-align: left;
-  margin-bottom: 24px;
+}
+
+/* Remaining stops of a line: aligned with the departures next to the 72px tile. */
+.next {
+  list-style: none;
+  margin: 12px 0 0 84px;
+  padding: 0;
+  font-size: var(--t-body);
+  color: var(--muted);
+}
+
+.next li {
+  display: flex;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.next .at {
+  flex: 0 0 3.2em;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+p.next {
+  margin-top: 12px;
 }
 
 /* Metro tile: big content, small lowercase label bottom-left. Colour = mode. */
