@@ -367,6 +367,16 @@ button:disabled {
   padding: 2px 0;
 }
 
+.next .stop-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .next .at {
   flex: 0 0 3.2em;
   color: var(--fg);

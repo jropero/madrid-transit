@@ -320,12 +320,14 @@ function LineGroup({
   stopId,
   hasAlert,
   now,
+  onSelect,
 }: {
   list: Departure[];
   destName: string;
   stopId: string;
   hasAlert: boolean;
   now: number;
+  onSelect: (s: Saved, el: HTMLElement) => void;
 }) {
   const [open, setOpen] = useState(false);
   const head = list[0];
@@ -354,7 +356,7 @@ function LineGroup({
           ))}
         </span>
       </button>
-      {open && <NextStops dep={head} stopId={stopId} id={panel} />}
+      {open && <NextStops dep={head} stopId={stopId} id={panel} onSelect={onSelect} />}
     </section>
   );
 }
@@ -622,6 +624,11 @@ function Departures({
   const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
   const board = useAlertBoard(alerts, routeIds, lines);
   const groups = groupDepartures(deps);
+  // From a line's stop list: select the stop (not saved) and return the pane to the top.
+  const showStop = (s: Saved, el: HTMLElement) => {
+    onSelect({ id: s.id, name: s.name });
+    el.closest('.pane')?.scrollTo({ top: 0 });
+  };
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
 
   async function nearMe() {
@@ -728,6 +735,7 @@ function Departures({
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
           hasAlert={board.marks(list[0].routeId, list[0].line)}
           now={now}
+          onSelect={showStop}
         />
       ))}
       {empty && (

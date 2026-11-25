@@ -23,10 +23,12 @@ export default function NextStops({
   dep,
   stopId,
   id,
+  onSelect,
 }: {
   dep: Departure;
   stopId: string;
   id: string;
+  onSelect: (s: { id: string; name: string }, el: HTMLElement) => void;
 }) {
   const [loaded, setLoaded] = useState<Loaded | 'error' | null>(null);
   const { routeId, pi, dest } = dep;
@@ -60,12 +62,25 @@ export default function NextStops({
     );
   return (
     <ol className="next" id={id}>
-      {rows.map((r, i) => (
-        <li key={`${r.id}-${i}`}>
-          <span className="at">{hhmm(r.at)}</span>
-          <span>{(loaded as Loaded).names.get(r.id) ?? r.id}</span>
-        </li>
-      ))}
+      {rows.map((r, i) => {
+        const name = (loaded as Loaded).names.get(r.id) ?? r.id;
+        return (
+          <li key={`${r.id}-${i}`}>
+            <span className="at">{hhmm(r.at)}</span>
+            {r.id === stopId ? (
+              <span>{name}</span>
+            ) : (
+              <button
+                className="stop-link tilt"
+                aria-label={`Ver salidas de ${name}`}
+                onClick={e => onSelect({ id: r.id, name }, e.currentTarget)}
+              >
+                <span>{name}</span>
+              </button>
+            )}
+          </li>
+        );
+      })}
     </ol>
   );
 }
