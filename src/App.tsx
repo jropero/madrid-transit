@@ -238,6 +238,7 @@ function LineGroup({
         <span className="dest">
           {short(destName)}
           <AlertMark on={hasAlert} />
+          {list.some(d => d.live) && <span className="live">en vivo</span>}
         </span>
         {list.slice(0, MAX_PER_GROUP).map(d => (
           <DepartureRow key={d.tripId} d={d} now={now} />

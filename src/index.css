@@ -393,6 +393,32 @@ button:disabled {
   margin-bottom: 2px;
 }
 
+.dest .live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--accent);
+  font-size: var(--t-small);
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.dest .live::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
 .dep {
   display: flex;
   align-items: baseline;
@@ -637,6 +663,7 @@ button:disabled {
     transform: none;
   }
 
+  .dest .live::before,
   .turn,
   .bar-menu,
   .views-row {

@@ -57,6 +57,7 @@ export type Departure = {
   planned: Date;
   expected: Date;
   cancelled: boolean;
+  live: boolean; // from CRTM times or a GTFS-RT trip update, not the static timetable
 };
 
 export type TripUpdates = {
@@ -190,6 +191,7 @@ function dayDepartures(
       planned,
       expected: planned,
       cancelled: false,
+      live: false,
     });
   }
   return out;
@@ -246,6 +248,7 @@ function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Depart
       planned,
       expected: planned,
       cancelled: false,
+      live: false,
     });
   });
   return out;
@@ -339,6 +342,7 @@ export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Depa
       ...d,
       expected: new Date(d.planned.getTime() + u.delay * 1000),
       cancelled: u.cancelled,
+      live: true,
     };
   });
 }
@@ -354,18 +358,24 @@ console.assert(
       planned: new Date('2026-11-25T07:00:00Z'),
       expected: new Date('2026-11-25T07:00:00Z'),
       cancelled: false,
+      live: false,
     };
-    const [a, b] = applyRealtime([d, { ...d, tripId: 't2' }], {
+    const [a, b, c] = applyRealtime([d, { ...d, tripId: 't2' }, { ...d, tripId: 't3' }], {
       entity: [
         { tripUpdate: { trip: { tripId: 't1' }, delay: 120 } },
         { tripUpdate: { trip: { tripId: 't2', scheduleRelationship: 'CANCELED' } } },
       ],
     });
     return (
-      a.expected.toISOString() === '2026-11-25T07:02:00.000Z' && !a.cancelled && b.cancelled
+      a.expected.toISOString() === '2026-11-25T07:02:00.000Z' &&
+      !a.cancelled &&
+      b.cancelled &&
+      a.live &&
+      b.live &&
+      !c.live
     );
   })(),
-  'applyRealtime delay and cancellation',
+  'applyRealtime delay, cancellation and live flag',
 );
 
 // CRTM stop times (undocumented website endpoint, via rt.php). XML-to-JSON style: a single child
@@ -448,6 +458,7 @@ export function mergeCrtm(
       planned: r.when,
       expected: r.when,
       cancelled: false,
+      live: true,
     }));
   return [...planned.filter(d => !lines.has(d.routeId)), ...live].sort(
     (a, b) => a.expected.getTime() - b.expected.getTime(),
@@ -506,6 +517,7 @@ console.assert(
       planned: new Date(iso),
       expected: new Date(iso),
       cancelled: false,
+      live: false,
     });
     const row: CrtmRow = {
       when: new Date('2026-11-25T09:07:00Z'),
@@ -525,7 +537,9 @@ console.assert(
       out.length === 2 &&
       out[0].routeId === 'A' &&
       out[0].expected.toISOString() === '2026-11-25T09:07:00.000Z' &&
+      out[0].live &&
       out[1].routeId === 'B' &&
+      !out[1].live &&
       mergeCrtm([dep('B', '2026-11-25T09:20:00Z')], [], {}, now).length === 1
     );
   })(),
