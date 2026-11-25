@@ -347,6 +347,10 @@ console.assert(
   'k t stops go through the timetable-only path and keep the tram flag',
 );
 
+// Order by expected time (planned plus delay, or the live time), ties by planned.
+export const byExpected = (a: Departure, b: Departure) =>
+  a.expected.getTime() - b.expected.getTime() || a.planned.getTime() - b.planned.getTime();
+
 // Trip-level delay (seconds) and cancellation from GTFS-RT; the feed covers all of Spain.
 export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Departure[] {
   if (!feed?.entity) return deps;
@@ -359,7 +363,7 @@ export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Depa
       cancelled: e.tripUpdate?.trip?.scheduleRelationship === 'CANCELED',
     });
   }
-  return deps.map(d => {
+  const merged = deps.map(d => {
     const u = byTrip.get(d.tripId);
     if (!u) return d;
     return {
@@ -369,6 +373,7 @@ export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Depa
       live: true,
     };
   });
+  return merged.sort(byExpected);
 }
 console.assert(
   (() => {
@@ -384,12 +389,15 @@ console.assert(
       cancelled: false,
       live: false,
     };
-    const [a, b, c] = applyRealtime([d, { ...d, tripId: 't2' }, { ...d, tripId: 't3' }], {
+    const out = applyRealtime([d, { ...d, tripId: 't2' }, { ...d, tripId: 't3' }], {
       entity: [
         { tripUpdate: { trip: { tripId: 't1' }, delay: 120 } },
         { tripUpdate: { trip: { tripId: 't2', scheduleRelationship: 'CANCELED' } } },
       ],
     });
+    // Result is ordered by expected time, so the delayed t1 comes last.
+    const [b, c, a] = out;
+    if (a.tripId !== 't1') return false;
     return (
       a.expected.toISOString() === '2026-11-25T07:02:00.000Z' &&
       !a.cancelled &&
@@ -460,7 +468,20 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
   return rows.sort((a, b) => a.when.getTime() - b.when.getTime());
 }
 
-const CRTM_GAP_MS = 20 * 60_000;
+// Self-check fixture: a bare timetable departure.
+const testDep = (routeId: string, iso: string): Departure => ({
+  tripId: iso + routeId,
+  routeId,
+  line: routeId,
+  color: '#000',
+  text: '#fff',
+  dest: 'H',
+  bus: true,
+  planned: new Date(iso),
+  expected: new Date(iso),
+  cancelled: false,
+  live: false,
+});
 
 const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   tripId: `crtm-${r.issue}-${r.routeId}-${i}`,
@@ -479,27 +500,31 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   live: true,
 });
 
-// First and last CRTM time per line, for the rows inside the window only.
-function crtmSpans(rows: CrtmRow[]): Map<string, { first: number; last: number }> {
-  const spans = new Map<string, { first: number; last: number }>();
+// Live row count and latest live time per route, for the rows inside the window.
+function crtmSpans(rows: CrtmRow[]): Map<string, { k: number; last: number }> {
+  const spans = new Map<string, { k: number; last: number }>();
   for (const r of rows) {
     const t = r.when.getTime();
-    const s = spans.get(r.routeId);
-    if (!s) spans.set(r.routeId, { first: t, last: t });
-    else spans.set(r.routeId, { first: Math.min(s.first, t), last: Math.max(s.last, t) });
+    const s = spans.get(r.routeId) ?? { k: 0, last: t };
+    spans.set(r.routeId, { k: s.k + 1, last: Math.max(s.last, t) });
   }
   return spans;
 }
 
-// A timetable departure of a covered line survives after CRTM's last time, or when it sits
-// more than 20 min before CRTM's first time (a gap in the CRTM answer).
-const keepsPlanned = (t: number, s: { first: number; last: number }) =>
-  t > s.last || t < s.first - CRTM_GAP_MS;
+// Timetable rows of one covered route that its live rows replace: everything planned up to the
+// latest live time, and at least k rows (each live bus consumes one scheduled trip, so a late
+// bus whose slot is earlier than its live time, or an early one, still removes its own slot).
+function replacedByLive(rows: Departure[], s: { k: number; last: number }): Departure[] {
+  const sorted = [...rows].sort((a, b) => a.planned.getTime() - b.planned.getTime());
+  const upToLast = sorted.filter(d => d.planned.getTime() <= s.last).length;
+  return sorted.slice(0, Math.max(upToLast, s.k));
+}
 
-// Merge rule: a line is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
-// covered line uses those CRTM rows plus its timetable departures after CRTM's last time (and
-// those over 20 min before its first); uncovered lines (including lines CRTM lists only far
-// in the future) keep their whole timetable.
+// Merge rule: a route is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
+// covered route shows its live rows plus the timetable rows that no live row stands for (see
+// replacedByLive); uncovered routes (including routes CRTM lists only far in the future) keep
+// their whole timetable. There is deliberately no "timetable rows long before CRTM's first
+// time survive" rule: it showed a live and a scheduled row for the same bus.
 export function mergeCrtm(
   planned: Departure[],
   rows: CrtmRow[] | null,
@@ -511,12 +536,13 @@ export function mergeCrtm(
   const to = now.getTime() + HORIZON_MS;
   const inWindow = rows.filter(r => r.when.getTime() >= from && r.when.getTime() <= to);
   const spans = crtmSpans(inWindow);
-  const kept = planned.filter(d => {
-    const s = spans.get(d.routeId);
-    return !s || keepsPlanned(d.expected.getTime(), s);
-  });
+  const dropped = new Set<Departure>();
+  for (const [routeId, s] of spans) {
+    const own = planned.filter(d => d.routeId === routeId);
+    for (const d of replacedByLive(own, s)) dropped.add(d);
+  }
   const live = inWindow.map((r, i) => crtmDeparture(r, i, routes));
-  return [...kept, ...live].sort((a, b) => a.expected.getTime() - b.expected.getTime());
+  return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
 console.assert(
   (() => {
@@ -560,19 +586,7 @@ console.assert(
 console.assert(
   (() => {
     const now = new Date('2026-11-25T09:00:00Z');
-    const dep = (routeId: string, iso: string): Departure => ({
-      tripId: iso + routeId,
-      routeId,
-      line: routeId,
-      color: '#000',
-      text: '#fff',
-      dest: 'H',
-      bus: true,
-      planned: new Date(iso),
-      expected: new Date(iso),
-      cancelled: false,
-      live: false,
-    });
+    const dep = (routeId: string, iso: string) => testDep(routeId, iso);
     const row: CrtmRow = {
       when: new Date('2026-11-25T09:07:00Z'),
       routeId: 'A',
@@ -603,20 +617,8 @@ console.assert(
 );
 console.assert(
   (() => {
-    const now = new Date('2026-11-25T09:00:00Z');
-    const dep = (iso: string): Departure => ({
-      tripId: iso,
-      routeId: 'A',
-      line: 'A',
-      color: '#000',
-      text: '#fff',
-      dest: 'H',
-      bus: true,
-      planned: new Date(iso),
-      expected: new Date(iso),
-      cancelled: false,
-      live: false,
-    });
+    const now = new Date('2026-11-25T14:35:00Z');
+    const dep = (iso: string, routeId = 'A') => testDep(routeId, iso);
     const row = (iso: string): CrtmRow => ({
       when: new Date(iso),
       routeId: 'A',
@@ -626,27 +628,39 @@ console.assert(
       metro: false,
       issue: '1',
     });
-    const plan = ['09:10', '09:40', '10:10', '10:40'].map(h => dep(`2026-11-25T${h}:00Z`));
-    // 07827 case: one far-future CRTM row leaves the whole timetable in place.
-    const far = mergeCrtm(plan, [row('2026-11-25T22:34:00Z')], {}, now);
-    // Normal case: CRTM 09:12 and 09:42 replace 09:10 and 09:40; 10:10 and 10:40 are kept.
-    const near = mergeCrtm(
-      plan,
-      [row('2026-11-25T09:12:00Z'), row('2026-11-25T09:42:00Z')],
+    const at = (h: string) => `2026-11-25T${h}Z`;
+    const plan = (...hs: string[]) => hs.map(h => dep(at(h)));
+    const show = (out: Departure[]) =>
+      out.map(d => `${d.expected.toISOString().slice(11, 16)}${d.live ? 'L' : ''}`).join(' ');
+    // (a) live 14:48:20 replaces the 14:48 timetable row.
+    const a = mergeCrtm(plan('14:48:00'), [row(at('14:48:20'))], {}, now);
+    // (b) a bus scheduled 14:30 runs 22 min late: its slot (and 14:45) goes, 15:00 stays.
+    const b = mergeCrtm(
+      plan('14:30:00', '14:45:00', '15:00:00'),
+      [row(at('14:52:00'))],
       {},
       now,
     );
+    // (c) two live buses consume 14:40 (<= last live) and the next slot 14:55.
+    const c = mergeCrtm(
+      plan('14:40:00', '14:55:00', '15:10:00'),
+      [row(at('14:40:00')), row(at('14:41:00'))],
+      {},
+      now,
+    );
+    // (d) 07827 case: one far-future CRTM row leaves the whole timetable in place.
+    const d = mergeCrtm(plan('14:40:00', '15:10:00'), [row(at('22:34:00'))], {}, now);
+    // Another route stays untouched.
+    const e = mergeCrtm([dep(at('14:50:00'), 'B')], [row(at('14:52:00'))], {}, now);
     return (
-      far.length === 4 &&
-      far.every(d => !d.live) &&
-      near.length === 4 &&
-      near.filter(d => d.live).length === 2 &&
-      near[0].expected.toISOString() === '2026-11-25T09:12:00.000Z' &&
-      near[2].expected.toISOString() === '2026-11-25T10:10:00.000Z' &&
-      !near[2].live
+      show(a) === '14:48L' &&
+      show(b) === '14:52L 15:00' &&
+      show(c) === '14:40L 14:41L 15:10' &&
+      show(d) === '14:40 15:10' &&
+      show(e) === '14:50 14:52L'
     );
   })(),
-  'mergeCrtm: far-future-only CRTM row keeps the timetable; near rows replace, later ones kept',
+  'mergeCrtm: live rows replace their timetable slots (late, early, several), far-future keeps it',
 );
 
 // EMT MobilityLabs arrivals (via rt.php): code "00", rows at data[0].Arrive. estimateArrive is
@@ -825,7 +839,7 @@ console.assert(
 
 // Departures still worth showing: not yet gone (30 s grace), within the horizon by plan.
 export const upcoming = (deps: Departure[], now: number) =>
-  deps.filter(d => d.expected.getTime() >= now - 30_000);
+  deps.filter(d => d.expected.getTime() >= now - 30_000).sort(byExpected);
 
 const isMadridRoute = (id: string) => id.startsWith('10T');
 const firstText = (t?: { translation?: { text?: string }[] }) =>
