@@ -598,16 +598,22 @@ export const alertsFor = (alerts: Alert[], routeIds: Set<string>) =>
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 console.assert(fold('Chamartín') === 'chamartin', 'fold');
 
-// Ranks a stop for a search: exact stop code, name prefix or exact town ("parla" lists the
-// stops in Parla), name substring, town substring, street; null = no match.
+// Ranks a stop for a search: exact stop code, exact name ("Parla" the station beats the
+// town's bus stops), name prefix or exact town, name substring, town substring, street;
+// null = no match.
 const rankWhole = (s: Stop, needle: string): number | null => {
   const name = fold(s.name);
   const town = fold(s.town ?? '');
-  if (s.code === needle) return 0;
-  if (name.startsWith(needle) || town === needle) return 1;
-  if (name.includes(needle)) return 2;
-  if (town.includes(needle)) return 3;
-  return fold(s.desc ?? '').includes(needle) ? 4 : null;
+  const hits = [
+    s.code === needle,
+    name === needle,
+    name.startsWith(needle) || town === needle,
+    name.includes(needle),
+    town.includes(needle),
+    fold(s.desc ?? '').includes(needle),
+  ];
+  const i = hits.indexOf(true);
+  return i < 0 ? null : i;
 };
 
 // Several words ("parla tajo"): each must appear in the code, name, town or street.
@@ -615,7 +621,7 @@ const rank = (s: Stop, needle: string): number | null => {
   const whole = rankWhole(s, needle);
   if (whole !== null || !needle.includes(' ')) return whole;
   const hay = fold(`${s.code ?? ''} ${s.name} ${s.town ?? ''} ${s.desc ?? ''}`);
-  return needle.split(' ').every(w => hay.includes(w)) ? 5 : null;
+  return needle.split(' ').every(w => hay.includes(w)) ? 6 : null;
 };
 
 // Stops in a town: exact town name first, else any town containing the text.
@@ -626,19 +632,27 @@ const inTown = (stops: Stop[], town: string): Stop[] => {
   return exact.length ? exact : stops.filter(s => fold(s.town ?? '').includes(t));
 };
 
-const byName = (a: Stop, b: Stop) => a.name.localeCompare(b.name, 'es');
+const MODE_ORDER = 'rtb';
+const modeIndex = (s: Stop) => {
+  const i = MODE_ORDER.indexOf(s.k ?? 'b');
+  return i < 0 ? MODE_ORDER.length : i;
+};
 
-// Town only: every stop in that town by name. Stop text: ranked matches (within the town).
+// Train stations first, then tram, then bus; then by name.
+const byModeName = (a: Stop, b: Stop) =>
+  modeIndex(a) - modeIndex(b) || a.name.localeCompare(b.name, 'es');
+
+// Town only: every stop in that town, trains then trams then buses. Stop text: ranked matches (within the town).
 export const searchStops = (stops: Stop[], q: string, town = ''): Stop[] => {
   const pool = inTown(stops, town);
   const needle = fold(q.trim()).replaceAll(/\s+/g, ' ');
-  if (!needle) return town.trim() ? pool.toSorted(byName) : [];
+  if (!needle) return town.trim() ? pool.toSorted(byModeName) : [];
   return pool
     .flatMap(s => {
       const r = rank(s, needle);
       return r === null ? [] : [{ s, r }];
     })
-    .sort((a, b) => a.r - b.r)
+    .sort((a, b) => a.r - b.r || byModeName(a.s, b.s))
     .slice(0, 40)
     .map(x => x.s);
 };
@@ -666,7 +680,7 @@ console.assert(
       ],
       'parla',
     ).map(s => s.id);
-    return found.join() === 'code,town,prefix,accent,name,street';
+    return found.join() === 'code,prefix,accent,town,name,street';
   })(),
   'searchStops ranks code, prefix/exact town, substring, town, street',
 );
@@ -700,6 +714,32 @@ console.assert(
     );
   })(),
   'searchStops filters by town',
+);
+
+console.assert(
+  (() => {
+    const base = { lat: 0, lon: 0, wa: false, town: 'Parla' };
+    const buses = Array.from({ length: 60 }, (_, i) => ({
+      ...base,
+      id: `b${i}`,
+      name: `Calle ${i}`,
+      k: 'b' as const,
+    }));
+    const stops = [
+      ...buses,
+      { ...base, id: 'tram', name: 'Alfonso XIII', k: 't' as const },
+      { ...base, id: 'bus', name: 'Zeta', k: 'b' as const },
+      { ...base, id: 'rail', name: 'Parla', k: 'r' as const },
+    ];
+    const town = searchStops(stops, '', 'Parla').map(s => s.id);
+    return (
+      searchStops(stops, 'parla')[0].id === 'rail' &&
+      town[0] === 'rail' &&
+      town[1] === 'tram' &&
+      town[2] === 'b0'
+    );
+  })(),
+  'searchStops: exact name first, town listing orders r, t, b',
 );
 
 export const townsOf = (stops: Stop[]): string[] =>

@@ -250,9 +250,18 @@ function LineGroup({
 
 const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía' };
 
-// "Parla · bus · 16578 · Calle Río Tajo 7" / "Parla · tranvía · 52 · Calle X" / "Parla · tren".
-const stopCaption = (s: Stop) =>
-  [s.town, STOP_MODE[s.k ?? ''] ?? 'tren', s.code, s.desc].filter(Boolean).join(' · ');
+// "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains and trams in bold.
+function StopCaption({ s }: { s: Stop }) {
+  const mode = STOP_MODE[s.k ?? ''] ?? 'tren';
+  const rest = [s.code, s.desc].filter(Boolean);
+  return (
+    <>
+      {s.town ? `${s.town} · ` : ''}
+      {s.k === 'b' ? mode : <b>{mode}</b>}
+      {rest.length ? ` · ${rest.join(' · ')}` : ''}
+    </>
+  );
+}
 
 function SearchPanel({
   town,
@@ -313,7 +322,9 @@ function SearchPanel({
               <span>
                 {s.name}
                 {s.dist !== undefined && <span className="dist"> {s.dist} m</span>}
-                <small className="sub">{stopCaption(s)}</small>
+                <small className="sub">
+                  <StopCaption s={s} />
+                </small>
               </span>
               <button className="btn" onClick={() => onShow(s)}>
                 ver
