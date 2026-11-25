@@ -34,6 +34,7 @@ Madrid Cercanías (Renfe) and CRTM interurban bus departures. React 19 + TypeScr
 
 ## Rules
 
+- All user-visible UI text is Spanish (Spain); code, comments and docs stay English. After adding or changing UI strings, run the `es-translator` agent (`.claude/agents/es-translator.md`, Haiku) to translate and check them.
 - Never read, print or commit `.env` (it holds `NAP_TOKEN`).
 - Wrap localStorage access in try/catch (use `loadJson` / `saveJson`). Keys are prefixed `madrid-transit:`.
 - New parsing or maths logic gets an inline `console.assert` self-check.

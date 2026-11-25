@@ -29,14 +29,24 @@ export default function Alerts({
 
 export const AlertMark = ({ on }: { on: boolean }) =>
   on ? (
-    <span className="warn-mark" role="img" aria-label="service alert" title="service alert">
+    <span
+      className="warn-mark"
+      role="img"
+      aria-label="aviso de servicio"
+      title="aviso de servicio"
+    >
       <Icon name="alert" size={16} />
     </span>
   ) : null;
 
 export const AccessMark = ({ on }: { on: boolean }) =>
   on ? (
-    <span className="acc" role="img" aria-label="step-free boarding" title="step-free boarding">
+    <span
+      className="acc"
+      role="img"
+      aria-label="acceso sin escalones"
+      title="acceso sin escalones"
+    >
       <Icon name="access" size={16} />
     </span>
   ) : null;

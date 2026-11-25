@@ -1,7 +1,8 @@
 {
   "name": "Madrid Transit",
   "short_name": "Madrid",
-  "description": "Next Renfe Cercanías departures in Madrid",
+  "description": "Próximas salidas de Cercanías Renfe en Madrid",
+  "lang": "es",
   "start_url": "/m/",
   "scope": "/m/",
   "id": "/m/",

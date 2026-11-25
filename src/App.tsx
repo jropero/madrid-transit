@@ -38,6 +38,7 @@ import {
 
 const VIEWS = ['departures', 'settings'] as const;
 type View = (typeof VIEWS)[number];
+const VIEW_LABEL: Record<View, string> = { departures: 'salidas', settings: 'ajustes' };
 
 // "Madrid-Atocha Cercanías" -> "Atocha Cercanías" for compact headers.
 const short = (name: string) => name.replace(/^Madrid-/, '');
@@ -72,7 +73,7 @@ type Realtime = { trips: TripUpdates | null; alerts: Alert[]; offline: Date | nu
 // drifts; in the background just re-arm the timer. Failures keep the previous data.
 function useRealtime(active: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
-  const [status, setStatus] = useState('Loading…');
+  const [status, setStatus] = useState('Cargando…');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -82,9 +83,15 @@ function useRealtime(active: boolean) {
       const [trips, alerts] = await Promise.all([fetchTripUpdates(), fetchAlerts()]);
       const offline = trips.offlineSince ?? alerts.offlineSince;
       setRt({ trips: trips.data, alerts: parseAlerts(alerts.data), offline });
-      setStatus(offline ? `offline · from ${hhmm(offline)}` : `live data ${hhmm(new Date())}`);
+      setStatus(
+        offline ? `sin conexión · desde ${hhmm(offline)}` : `datos en vivo ${hhmm(new Date())}`,
+      );
     } catch (err) {
-      setStatus(isOffline(err) ? 'offline · no live data' : `no live data: ${String(err)}`);
+      setStatus(
+        isOffline(err)
+          ? 'sin conexión · sin datos en vivo'
+          : `sin datos en vivo: ${String(err)}`,
+      );
     } finally {
       setLoading(false);
       setLoadedAt(Date.now());
@@ -136,9 +143,9 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
       <span className="time">{hhmm(d.planned)}</span>
       {delay > 0 && !d.cancelled && <span className="late">+{delay}'</span>}
       {d.cancelled ? (
-        <span className="tag bad">cancelled</span>
+        <span className="tag bad">cancelado</span>
       ) : (
-        <span className="left">{left === 0 ? 'now' : `${left} min`}</span>
+        <span className="left">{left === 0 ? 'ahora' : `${left} min`}</span>
       )}
     </span>
   );
@@ -180,7 +187,7 @@ function LineGroup({
 
 // "bus · 17480 · Avda del Arco de la Victoria 3600" / "train".
 const stopCaption = (s: Stop) =>
-  [s.k === 'b' ? 'bus' : 'train', s.code, s.desc].filter(Boolean).join(' · ');
+  [s.k === 'b' ? 'bus' : 'tren', s.code, s.desc].filter(Boolean).join(' · ');
 
 function SearchPanel({
   query,
@@ -204,13 +211,13 @@ function SearchPanel({
       <form onSubmit={onSubmit} className="search">
         <input
           type="text"
-          aria-label="Stop name"
-          placeholder="stop name"
+          aria-label="Nombre de la parada"
+          placeholder="nombre de la parada"
           value={query}
           onChange={e => onQuery(e.target.value)}
         />
         <button type="submit" className="btn">
-          go
+          ir
         </button>
       </form>
       {results.length > 0 && (
@@ -223,10 +230,10 @@ function SearchPanel({
                 <small className="sub">{stopCaption(s)}</small>
               </span>
               <button className="btn" onClick={() => onShow(s)}>
-                show
+                ver
               </button>
               <button className="btn" disabled={isSaved(s)} onClick={() => onSave(s)}>
-                save
+                guardar
               </button>
             </li>
           ))}
@@ -249,7 +256,7 @@ function StopsRow({
   // Nothing to switch to: the title below already names the stop.
   if (row.length < 2) return null;
   return (
-    <nav className="stops" aria-label="Saved stops">
+    <nav className="stops" aria-label="Paradas guardadas">
       {row.map(s => (
         <button key={s.id} aria-current={s.id === selected.id} onClick={() => onSelect(s)}>
           {short(s.name)}
@@ -263,8 +270,10 @@ function StopsRow({
 function expiryNote(tt: Timetable | null, now: Date, bus: boolean) {
   if (!tt || bus) return '';
   const today = madridDate(now);
-  if (today > tt.days.to) return `timetable ended ${ddmm(tt.days.to)} — redeploy`;
-  return daysUntil(tt.days.to, now) < 7 ? `timetable ends ${ddmm(tt.days.to)} — redeploy` : '';
+  if (today > tt.days.to) return `horario terminado el ${ddmm(tt.days.to)} — actualiza la app`;
+  return daysUntil(tt.days.to, now) < 7
+    ? `horario termina el ${ddmm(tt.days.to)} — actualiza la app`
+    : '';
 }
 
 function statusLine(parts: string[]) {
@@ -317,13 +326,15 @@ function Departures({
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
 
   async function nearMe() {
-    rt.setStatus('locating…');
+    rt.setStatus('localizando…');
     try {
       const [here, all] = await Promise.all([locate(), loadAllStops()]);
       const found = nearStops(all, here);
       setResults(found as NearStop[]);
       setShowSearch(true);
-      rt.setStatus(found.length ? `${found.length} stops nearby` : 'no stops within 3 km');
+      rt.setStatus(
+        found.length ? `paradas cercanas: ${found.length}` : 'ninguna parada a menos de 3 km',
+      );
     } catch (err) {
       rt.setStatus(err instanceof Error ? err.message : String(err));
     }
@@ -334,9 +345,9 @@ function Departures({
     try {
       const found = searchStops(await loadAllStops(), query);
       setResults(found);
-      if (!found.length) rt.setStatus(`no stop matches "${query.trim()}"`);
+      if (!found.length) rt.setStatus(`ninguna parada coincide con "${query.trim()}"`);
     } catch (err) {
-      rt.setStatus(isOffline(err) ? 'offline · stop list not loaded' : String(err));
+      rt.setStatus(isOffline(err) ? 'sin conexión · lista de paradas no cargada' : String(err));
     }
   }
 
@@ -347,18 +358,18 @@ function Departures({
       {active && (
         <AppBar
           actions={[
-            { icon: 'refresh', label: 'Refresh', onClick: rt.load },
+            { icon: 'refresh', label: 'Actualizar', onClick: rt.load },
             {
               icon: 'search',
-              label: 'Search',
+              label: 'Buscar',
               expanded: showSearch,
               onClick: () => setShowSearch(!showSearch),
             },
-            { icon: 'nearMe', label: 'Near me', onClick: nearMe },
+            { icon: 'nearMe', label: 'Cerca de mí', onClick: nearMe },
           ]}
           menu={[
             {
-              label: 'remove stop',
+              label: 'eliminar parada',
               disabled: !isSaved(selected) || stops.length <= 1,
               onClick: () => {
                 const next = stops.filter(s => s.id !== selected.id);
@@ -401,13 +412,13 @@ function Departures({
           now={now}
         />
       ))}
-      {empty && <p className="status">no departures in the next 2 hours</p>}
+      {empty && <p className="status">sin salidas en las próximas 2 horas</p>}
 
       <p className="status">
         {statusLine([
           error,
           depsError,
-          bus ? 'timetable only, no live data' : rt.status,
+          bus ? 'solo horario, sin datos en vivo' : rt.status,
           expiryNote(tt, new Date(now), bus),
         ])}
       </p>
@@ -511,7 +522,7 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
   };
 
   return (
-    <nav className="views" aria-label="Views">
+    <nav className="views" aria-label="Vistas">
       <div className="views-row" key={view} ref={row}>
         {order.map(v => (
           <button
@@ -520,7 +531,7 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
             onClick={() => onSelect(v)}
             onKeyDown={onKeyDown}
           >
-            {v}
+            {VIEW_LABEL[v]}
           </button>
         ))}
       </div>
@@ -539,7 +550,7 @@ export default function App() {
   }
 
   const pane = (v: View, children: React.ReactNode) => (
-    <section className="pane" aria-label={v} inert={view !== v}>
+    <section className="pane" aria-label={VIEW_LABEL[v]} inert={view !== v}>
       <div className={turn === v ? 'pane-in turn' : 'pane-in'}>{children}</div>
     </section>
   );

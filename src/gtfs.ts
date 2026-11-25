@@ -444,10 +444,10 @@ export const nearStops = (stops: Stop[], here: { lat: number; lon: number }): Ne
 export const locate = () =>
   new Promise<{ lat: number; lon: number }>((resolve, reject) => {
     if (!navigator.geolocation)
-      return reject(new Error('location not available in this browser'));
+      return reject(new Error('ubicación no disponible en este navegador'));
     navigator.geolocation.getCurrentPosition(
       ({ coords }) => resolve({ lat: coords.latitude, lon: coords.longitude }),
-      err => reject(new Error(`location: ${err.message}`)),
+      err => reject(new Error(`ubicación: ${err.message}`)),
       { enableHighAccuracy: true, timeout: 10_000 },
     );
   });

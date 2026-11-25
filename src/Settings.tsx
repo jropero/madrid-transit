@@ -5,7 +5,7 @@ export default function Settings() {
   const [accent, setAccent] = useState<AccentName>(loadAccent);
   return (
     <>
-      <h2 className="title">accent colour</h2>
+      <h2 className="title">color de acento</h2>
       <div className="swatches">
         {ACCENTS.map(a => (
           <button
@@ -13,7 +13,7 @@ export default function Settings() {
             className="swatch tilt"
             style={{ '--swatch': a.hex } as React.CSSProperties}
             aria-pressed={accent === a.name}
-            aria-label={a.name}
+            aria-label={a.label}
             onClick={() => {
               setAccent(a.name);
               applyAccent(a.name);
@@ -21,12 +21,12 @@ export default function Settings() {
           />
         ))}
       </div>
-      <h2 className="title">about</h2>
+      <h2 className="title">acerca de</h2>
       <p className="about">
-        Cercanías Madrid timetable and live delays from Renfe open data (GTFS and GTFS-Realtime,
-        data.renfe.com). Interurban bus timetables (no live data) from the Consorcio Regional de
-        Transportes de Madrid via the National Access Point. Type: Selawik (SIL OFL). Icons:
-        Fluent UI System Icons (MIT).
+        Horarios de Cercanías Madrid y retrasos en tiempo real, con datos abiertos de Renfe
+        (GTFS y GTFS-Realtime, data.renfe.com). Horarios de autobuses interurbanos (sin datos en
+        vivo) del Consorcio Regional de Transportes de Madrid a través del Punto de Acceso
+        Nacional. Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons (MIT).
       </p>
       <p className="about">
         Powered by{' '}

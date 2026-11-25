@@ -23,7 +23,7 @@ export default function AppBar({
 }) {
   const [expanded, setExpanded] = useState(false);
   return createPortal(
-    <nav className={expanded ? 'appbar open' : 'appbar'} aria-label="Actions">
+    <nav className={expanded ? 'appbar open' : 'appbar'} aria-label="Acciones">
       {expanded && menu.length > 0 && (
         <ul className="bar-menu">
           {menu.map(m => (
@@ -61,7 +61,7 @@ export default function AppBar({
         ))}
         <button
           className="bar-more"
-          aria-label="More"
+          aria-label="Más"
           aria-expanded={expanded}
           onClick={() => setExpanded(!expanded)}
         >
