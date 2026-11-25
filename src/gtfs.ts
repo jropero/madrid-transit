@@ -1387,6 +1387,7 @@ export const locate = () =>
 
 // Saved stops: [{ id, name }].
 export type Saved = { id: string; name: string };
+export const short = (name: string) => name.replace(/^Madrid-/, '');
 const STOPS_KEY = 'madrid-transit:stops';
 const DEFAULT_STOPS: Saved[] = [
   { id: '18000', name: 'Madrid-Atocha Cercanías' },

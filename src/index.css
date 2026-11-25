@@ -543,6 +543,23 @@ p.next {
   vertical-align: baseline;
 }
 
+.trail {
+  align-items: baseline;
+  gap: 8px;
+}
+
+.trail span {
+  font-size: var(--t-item);
+  font-weight: 300;
+  text-transform: lowercase;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.trail span[aria-current='true'] {
+  color: var(--fg);
+}
+
 .stops .unsaved {
   font-style: italic;
   opacity: 0.7;
@@ -866,19 +883,6 @@ p.next {
 
 .near .dist {
   color: var(--muted);
-}
-
-.back {
-  display: block;
-  margin: 0 0 8px;
-  padding: 4px 0;
-  border: 0;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: var(--t-small);
-  text-align: left;
-  cursor: pointer;
 }
 
 .toast {

@@ -3,7 +3,8 @@ import type { Saved } from './gtfs.ts';
 
 // Stop navigation: a jump (line stop list, connection, search) pushes a history entry so system
 // back walks the jumps; picking a saved stop only replaces the current entry.
-export type Nav = { stop: Saved; from?: Saved; openLine?: string };
+// `trail` = the stops of the current exploration, from where the first jump started to `stop`.
+export type Nav = { stop: Saved; trail?: Saved[]; openLine?: string };
 
 const navOf = (st: unknown): Nav | null => {
   const s = st as Partial<Nav> | null;
@@ -74,8 +75,9 @@ export function useStopNav(initial: Saved) {
 
   const jump = (stop: Saved, openLine?: string) => {
     if (stop.id === nav.stop.id) return;
-    const n = onPivotEntry() ? { stop } : { stop, from: nav.stop };
-    if (n.from) write({ ...nav, openLine }, false);
+    const pivot = onPivotEntry();
+    const n: Nav = pivot ? { stop } : { stop, trail: [...(nav.trail ?? [nav.stop]), stop] };
+    if (!pivot) write({ ...nav, openLine }, false);
     setNav(n);
     write(n, true);
   };

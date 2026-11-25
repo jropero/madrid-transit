@@ -3,6 +3,7 @@ import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
+import Trail from './Trail.tsx';
 import { useStopNav, type Nav } from './nav.ts';
 import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
 import Alerts, { AccessMark, AlertMark, useAlertBoard } from './Alerts.tsx';
@@ -41,6 +42,7 @@ import {
   saveSaved,
   scheduled,
   searchStops,
+  short,
   townsOf,
   upcoming,
   type Alert,
@@ -59,7 +61,6 @@ type View = (typeof VIEWS)[number];
 const VIEW_LABEL: Record<View, string> = { departures: 'salidas', settings: 'ajustes' };
 
 // "Madrid-Atocha Cercanías" -> "Atocha Cercanías" for compact headers.
-const short = (name: string) => name.replace(/^Madrid-/, '');
 
 // Static timetable (stops, routes, calendar), loaded once.
 function useTimetable() {
@@ -535,6 +536,12 @@ function SearchPanel({
 const saveAction = (saved: boolean, onClick: () => void): BarAction[] =>
   saved ? [] : [{ icon: 'star', label: 'Guardar parada', text: 'guardar', onClick }];
 
+// While exploring (two or more stops in the trail) the app bar leads with "volver".
+const backAction = (trail: Saved[]): BarAction[] =>
+  trail.length < 2
+    ? []
+    : [{ icon: 'back', label: 'Volver', text: 'volver', onClick: () => history.back() }];
+
 function StopsRow({
   stops,
   selected,
@@ -655,19 +662,6 @@ function stopCodeLabel(info: Stop | undefined, id: string): string {
 
 const INFO_PANEL = 'stop-info';
 
-// Shown under the title when the stop was reached by a jump; system back undoes the jump.
-function BackLink({ name }: { name: string }) {
-  return (
-    <button
-      className="back tilt"
-      aria-label={`Volver a ${name}`}
-      onClick={() => history.back()}
-    >
-      ‹ volver a {name}
-    </button>
-  );
-}
-
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -684,7 +678,7 @@ function Departures({
   onJump: (s: Saved, openLine?: string) => void;
   onStops: (next: Saved[]) => void;
 }) {
-  const { stop: selected, from, openLine } = nav;
+  const { stop: selected, trail = [], openLine } = nav;
   const [query, setQuery] = useState('');
   const [townQuery, setTownQuery] = useState('');
   const [towns, setTowns] = useState<string[]>([]);
@@ -771,6 +765,7 @@ function Departures({
       {active && (
         <AppBar
           actions={[
+            ...backAction(trail),
             { icon: 'refresh', label: 'Actualizar', onClick: rt.load },
             {
               icon: 'search',
@@ -795,12 +790,12 @@ function Departures({
         />
       )}
       <StopsRow stops={stops} selected={selected} onSelect={onSelect} />
+      <Trail trail={trail} />
       <h2 className="title">
         {short(selected.name)} <AccessMark on={wa} />
         <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
       </h2>
       {subtitle && <small className="sub">{subtitle}</small>}
-      {from && <BackLink name={short(from.name)} />}
       {infoOpen && tt && (
         <StopInfo
           id={INFO_PANEL}
