@@ -4,7 +4,7 @@
 // and EMT stops/routes (live only). Plain Node, no dependencies.
 // The downloaded GTFS zips are untrusted data: they are only parsed (never executed), live in
 // .cache/, and single files are streamed through `unzip -p` (shapes.txt is never extracted).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import {
   createWriteStream,
@@ -36,6 +36,13 @@ const LD = {
   label: 'LD',
   url: 'https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip',
   zip: `${CACHE}ld.zip`,
+};
+// Ouigo España high-speed trains (NAP dataset 1766, ApiKey header): timetable only. Optional.
+const OUIGO = {
+  label: 'Ouigo',
+  auth: true,
+  url: 'https://nap.transportes.gob.es/api/Fichero/download/1766',
+  zip: `${CACHE}ouigo.zip`,
 };
 // route_short_name -> tile label, name and colours (white text unless stated).
 const LD_PRODUCTS = {
@@ -642,6 +649,186 @@ console.assert(
   'tripEnds yields the arrival at the last stop of trips with 2+ calls',
 );
 
+const foldName = n =>
+  n.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+console.assert(foldName(' Núñez  de Balboa') === 'nunez de balboa', 'foldName');
+
+// ---------------------------------------------------------------- Ouigo (high-speed, timetable only)
+
+const OUIGO_MAP_M = 600;
+// Name words that differ between operators for the same station ("Madrid Puerta de Atocha").
+const foldStation = n =>
+  foldName(n)
+    .replace(/\b(madrid|puerta|de|estacion|la|el)\b/g, '')
+    .replace(/[^a-z0-9]+/g, '');
+console.assert(
+  foldStation('Madrid Puerta de Atocha') === foldStation('Madrid-Puerta de Atocha') &&
+    foldStation('Madrid Puerta de Atocha') === 'atocha',
+  'foldStation',
+);
+
+// The Renfe stop an Ouigo stop stands for: among Renfe stops within OUIGO_MAP_M, the one with the
+// same folded name, else the nearest. Returns { stop, dist } or null.
+function nearestRenfe(o, candidates) {
+  const near = candidates
+    .map(s => ({ stop: s, dist: metres(o, s) }))
+    .filter(x => x.dist <= OUIGO_MAP_M)
+    .sort((a, b) => a.dist - b.dist);
+  const same = near.find(x => foldStation(x.stop.name) === foldStation(o.name));
+  return same ?? near[0] ?? null;
+}
+console.assert(
+  (() => {
+    const c = [
+      { id: 'a', name: 'Sol', lat: 40, lon: -3 },
+      { id: 'b', name: 'Madrid Atocha', lat: 40.001, lon: -3 },
+    ];
+    const m = nearestRenfe({ name: 'Atocha', lat: 40.0005, lon: -3 }, c);
+    return m.stop.id === 'b' && nearestRenfe({ name: 'X', lat: 41, lon: -3 }, c) === null;
+  })(),
+  'nearestRenfe prefers the same name, ignores stops beyond 600 m',
+);
+
+// Ouigo stops.txt -> { stops: ouigoId -> renfeId, added: [new k:'r' stops], table: [report lines] }.
+async function ouigoStopMap(zip, renfeStops) {
+  const map = new Map();
+  const added = [];
+  const table = [];
+  for await (const s of rows(zip, 'stops.txt')) {
+    const o = {
+      id: s.stop_id,
+      name: s.stop_name,
+      lat: coord(s.stop_lat),
+      lon: coord(s.stop_lon),
+    };
+    const hit = nearestRenfe(o, renfeStops);
+    if (hit) {
+      map.set(o.id, hit.stop.id);
+      table.push(`${o.name} -> ${hit.stop.id} ${hit.stop.name} (${Math.round(hit.dist)} m)`);
+      continue;
+    }
+    map.set(o.id, `ouigo_${o.id}`);
+    added.push({ ...o, id: `ouigo_${o.id}`, wa: s.wheelchair_boarding === '1', k: 'r' });
+    table.push(`${o.name} -> ouigo_${o.id} (added, no Renfe stop within ${OUIGO_MAP_M} m)`);
+  }
+  return { map, added, table };
+}
+
+async function ouigoRoutes(zip) {
+  const routes = {};
+  for await (const r of rows(zip, 'routes.txt')) {
+    routes[r.route_id] = {
+      line: 'OUIGO',
+      name: 'Ouigo',
+      color: '#E6007E',
+      text: '#FFFFFF',
+      ld: true,
+      op: 'ouigo',
+    };
+  }
+  return routes;
+}
+
+// Trips as { trips: ouigo:<tripId> -> { routeId: ouigo_<routeId>, serviceId }, byTrip } with the
+// stop ids already mapped to Renfe ids. Only trips calling at a `madrid` stop are kept.
+async function ouigoTrips(zip, routes, stopMap, madrid) {
+  const all = new Map();
+  for await (const t of rows(zip, 'trips.txt')) {
+    if (routes[t.route_id])
+      all.set(t.trip_id, { routeId: t.route_id, serviceId: t.service_id });
+  }
+  const raw = await loadByTrip(zip, all);
+  const trips = new Map();
+  const byTrip = new Map();
+  for (const [id, list] of raw) {
+    const mapped = list.map(([seq, dep, stopId, arr]) => [seq, dep, stopMap.get(stopId), arr]);
+    if (!mapped.some(r => madrid.has(r[2]))) continue;
+    trips.set(`ouigo:${id}`, { ...all.get(id), routeId: `ouigo_${all.get(id).routeId}` });
+    byTrip.set(`ouigo:${id}`, mapped);
+  }
+  return { trips, byTrip };
+}
+
+// Folds `from` (an LD stop file of the same shape) into `into`, re-pointing its r/d/o/c indexes.
+function mergeLdFile(into, from) {
+  const idx = (dst, src) => src.map(v => indexOf(dst, v));
+  const [ri, di, oi] = [idx(into.r, from.r), idx(into.d, from.d), idx(into.o, from.o)];
+  const keys = into.c.map(c => JSON.stringify(c));
+  const ci = from.c.map(c => {
+    const i = indexOf(keys, JSON.stringify(c));
+    if (i === into.c.length) into.c.push(c);
+    return i;
+  });
+  for (const [secs, c, r, d, p, id, o] of from.x)
+    into.x.push([secs, ci[c], ri[r], di[d], p, id, oi[o]]);
+  for (const [secs, c, r, o, p, id] of from.a) into.a.push([secs, ci[c], ri[r], oi[o], p, id]);
+  into.x.sort((a, b) => a[0] - b[0]);
+  into.a.sort((a, b) => a[0] - b[0]);
+}
+
+// Adds every stop file of `extra` to `files` (merging where both have the stop).
+function mergeLdFiles(files, extra) {
+  for (const [id, f] of extra) {
+    if (files.has(id)) mergeLdFile(files.get(id), f);
+    else files.set(id, f);
+  }
+}
+console.assert(
+  (() => {
+    const mk = (r, id) => ({
+      r: [r],
+      d: ['9'],
+      o: ['7'],
+      c: [[1, 2, 3, [], []]],
+      x: [[10, 0, 0, 0, 0, id, 0]],
+      a: [],
+    });
+    const m = mk('A', 't1');
+    mergeLdFile(m, {
+      ...mk('B', 'ouigo:t2'),
+      c: [[9, 2, 3, [], []]],
+      x: [[5, 0, 0, 0, 0, 'ouigo:t2', 0]],
+    });
+    return (
+      m.r.join() === 'A,B' &&
+      m.c.length === 2 &&
+      m.x[0][5] === 'ouigo:t2' &&
+      m.x[0][1] === 1 &&
+      m.x[0][2] === 1 &&
+      m.x[1][5] === 't1'
+    );
+  })(),
+  'mergeLdFile re-points routes and calendars and keeps rows sorted',
+);
+
+// Ouigo high-speed: its own stop ids are mapped to Renfe stops (new k:'r' stops when none is near),
+// trips are `ouigo:<id>`, routes `ouigo_<id>`. Rows use the LD per-stop format. Optional: a
+// missing NAP token or any failure builds without it.
+async function buildOuigo(renfe, madrid) {
+  try {
+    if (!(await ensureFeed(OUIGO))) return null;
+    const zip = OUIGO.zip;
+    const { map, added, table } = await ouigoStopMap(zip, renfe.stops);
+    const routes = await ouigoRoutes(zip);
+    const { trips, byTrip } = await ouigoTrips(zip, routes, map, madrid);
+    const used = new Set([...trips.values()].map(t => t.serviceId));
+    const cals = await busCalendars(zip, used);
+    const pats = makePatterns();
+    const files = ldFiles(trips, byTrip, cals, pats);
+    renfe.stops.push(...added);
+    const kept = new Map([...trips.values()].map(t => [t.routeId, true]));
+    const out = Object.fromEntries(
+      Object.entries(routes)
+        .map(([id, r]) => [`ouigo_${id}`, r])
+        .filter(([id]) => kept.has(id)),
+    );
+    return { routes: out, files, pats, trips: trips.size, table, added: added.length };
+  } catch (err) {
+    console.warn(`Ouigo step failed (${err.message}): skipping`);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------- Buses
 
 // Town of a town-bus route id (`9__1__106_`: line 1 of municipality 106, province 28 = Madrid).
@@ -701,8 +888,14 @@ function applyException(cal, e) {
   else if (e.exception_type === '2') cal[4].push(+e.date);
 }
 
+// calendar.txt and calendar_dates.txt are each optional in GTFS (a feed may ship only one).
+async function* optionalRows(zip, name) {
+  const listing = spawnSync('unzip', ['-Z1', zip], { encoding: 'utf8' }).stdout ?? '';
+  if (listing.split('\n').includes(name)) yield* rows(zip, name);
+}
+
 async function addExceptions(zip, cals, used) {
-  for await (const e of rows(zip, 'calendar_dates.txt')) {
+  for await (const e of optionalRows(zip, 'calendar_dates.txt')) {
     if (!used.has(e.service_id)) continue;
     const cal = cals.get(e.service_id) ?? EMPTY_CAL();
     cals.set(e.service_id, cal);
@@ -713,7 +906,7 @@ async function addExceptions(zip, cals, used) {
 // serviceId -> [weekdayMask, startYmd, endYmd, added[], removed[]] (dates as numbers).
 async function busCalendars(zip, used) {
   const cals = new Map();
-  for await (const c of rows(zip, 'calendar.txt')) {
+  for await (const c of optionalRows(zip, 'calendar.txt')) {
     if (used.has(c.service_id))
       cals.set(c.service_id, [maskOf(c), +c.start_date, +c.end_date, [], []]);
   }
@@ -884,9 +1077,6 @@ async function metroStops(zip) {
 }
 
 const MERGE_M = 300;
-const foldName = n =>
-  n.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
-console.assert(foldName(' Núñez  de Balboa') === 'nunez de balboa', 'foldName');
 
 // The Metro GTFS has one station record per line at an interchange, but CRTM answers every
 // line's trains for any of them. Stations with the same normalised name within 300 m become one:
@@ -1469,9 +1659,34 @@ function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly, ld) {
   );
 }
 
+// The LD build with the Ouigo stop files merged in (a bare shell when only Ouigo built).
+function joinOuigo(ld, ouigo) {
+  if (!ouigo) return ld;
+  const base = ld ?? {
+    routes: {},
+    files: new Map(),
+    pats: makePatterns(),
+    trips: 0,
+    newStops: 0,
+  };
+  mergeLdFiles(base.files, ouigo.files);
+  return base;
+}
+
+function reportOuigo(ouigo) {
+  if (!ouigo) return console.log('Ouigo: skipped');
+  console.log(
+    `Ouigo: routes ${Object.keys(ouigo.routes).length}, trips ${ouigo.trips}, stops ${ouigo.table.length} (${ouigo.table.length - ouigo.added} mapped, ${ouigo.added} added)`,
+  );
+  for (const line of ouigo.table) console.log(`  ${line}`);
+}
+
 async function main() {
   const renfe = await buildRenfe();
-  const ld = await buildLd(renfe); // adds its stops to renfe.stops before towns are assigned
+  const madrid = new Set([...renfe.stops.map(s => s.id), ...LD_HUBS]);
+  const ld0 = await buildLd(renfe); // adds its stops to renfe.stops before towns are assigned
+  const ouigo = await buildOuigo(renfe, madrid);
+  const ld = joinOuigo(ld0, ouigo);
   const bus = await buildCrtm(BUS);
   const ml = await buildCrtm(ML);
   const urb = await buildUrban();
@@ -1507,6 +1722,7 @@ async function main() {
   await writeJson('routes.json', {
     ...renfe.routes,
     ...ld?.routes,
+    ...ouigo?.routes,
     ...bus?.routes,
     ...urb?.routes,
     ...ml?.routes,
@@ -1515,13 +1731,14 @@ async function main() {
   });
   await writeJson('days.json', renfe.days);
   await writeStopFiles(stops, renfe, [bus, urb, ml].filter(Boolean), ld);
-  await writeRouteFiles([renfe, ld, bus, urb, ml, metro, emt]);
+  await writeRouteFiles([renfe, ld, ouigo, bus, urb, ml, metro, emt]);
   sz.lines = await writeJson(
     'stop-lines.json',
-    stopLines([renfe, ld, bus, urb, ml, metro, emt]),
+    stopLines([renfe, ld, ouigo, bus, urb, ml, metro, emt]),
   );
   await writeAllowList(stops);
   report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly, ld);
+  reportOuigo(ouigo);
 }
 
 await main();

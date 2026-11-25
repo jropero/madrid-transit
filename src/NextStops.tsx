@@ -11,6 +11,7 @@ import {
   expectedTimes,
   findPosition,
   hhmm,
+  isOuigo,
   nextStops,
   pickPattern,
   plannedTimes,
@@ -324,12 +325,13 @@ function followView(loaded: ReturnType<typeof usePattern>, dep: Departure, stopI
 function FollowTrain({ dep, stopId, id, onSelect }: StopProps) {
   const loaded = usePattern(dep, stopId);
   const ldOn = useLdEnabled();
-  const live = useLive(dep.tripId, !!dep.ld && ldOn);
+  const ouigo = isOuigo(dep.routeId);
+  const live = useLive(dep.tripId, !!dep.ld && ldOn && !ouigo);
   const view = followView(loaded, dep, stopId);
   if (typeof view === 'string') return <Message id={id} text={view} />;
   const { pattern, planned, names } = view;
   const delays = stopDelays(live?.entry?.stops, new Map(planned.map(t => [t.id, t.at])));
-  const status = liveStatus(live);
+  const status = ouigo ? 'Ouigo: solo horario' : liveStatus(live);
   return (
     <div id={id}>
       {status && <p className="status next">{status}</p>}

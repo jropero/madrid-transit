@@ -23,7 +23,8 @@ export type RouteInfo = {
   tram?: boolean;
   metro?: boolean;
   urban?: boolean; // town bus (CRTM "Autobuses Urbanos")
-  ld?: boolean; // Renfe media/larga distancia (AVE, AVLO, AVANT, Euromed, IC, MD)
+  ld?: boolean; // media/larga distancia (Renfe AVE, AVLO, AVANT, Euromed, IC, MD; Ouigo)
+  op?: string; // operator of a media/larga distancia route when not Renfe ('ouigo')
   svc?: Partial<Record<DayType, Svc>>; // EMT: service summary per day type
 };
 // [first HH:MM, last HH:MM, min headway (min), max headway (min)]
@@ -688,12 +689,17 @@ console.assert(
   'applyRealtime delay, cancellation and live flag',
 );
 
+export const isOuigo = (routeId: string) => routeId.startsWith('ouigo_');
+console.assert(isOuigo('ouigo_R1') && !isOuigo('10T0005C2'), 'isOuigo');
+
 // Renfe lists one physical train under several trip ids (variants, or two products at once).
 // Among LD departures keep one per planned time + destination: the live one if any, else the
 // first in current order. Other departures are untouched.
 // `arrivals`: the kept row also lists every distinct origin of the rows it stands for (`origins`,
 // in current order), since coupled twins share a destination but not an origin.
-const ldKey = (d: Departure) => `${d.planned.getTime()}|${d.dest}`;
+// Never merges rows of different operators (Ouigo routes are `ouigo_<id>`).
+const ldKey = (d: Departure) =>
+  `${d.planned.getTime()}|${d.dest}|${isOuigo(d.routeId) ? 'ouigo' : 'renfe'}`;
 
 // Distinct origins per planned time + destination, in current order.
 function originsByKey(deps: Departure[]) {
@@ -753,6 +759,26 @@ console.assert(
     );
   })(),
   'dedupeLd keeps the live row and distinct times',
+);
+console.assert(
+  (() => {
+    const t = new Date('2026-11-25T19:35:00Z');
+    const mk = (routeId: string): Departure => ({
+      tripId: routeId,
+      routeId,
+      line: 'X',
+      color: '#000',
+      text: '#fff',
+      dest: '9',
+      ld: true,
+      planned: t,
+      expected: t,
+      cancelled: false,
+      live: false,
+    });
+    return dedupeLd([mk('AV1'), mk('ouigo_R1'), mk('AV2')]).length === 2;
+  })(),
+  'dedupeLd never merges Renfe and Ouigo rows',
 );
 
 // Long line labels (AVLO, AVANT, Euromed) get a smaller font to fit the tile: CSS class suffix.
@@ -2332,6 +2358,7 @@ export function sourceOf(routeId: string, r: RouteInfo | undefined): string {
   if (routeId.startsWith('emt_')) return 'EMT MobilityLabs (en vivo)';
   if (r?.metro) return 'CRTM (en vivo)';
   if (r?.tram) return 'CRTM (en vivo) y horario';
+  if (r?.op === 'ouigo' || isOuigo(routeId)) return 'Ouigo: solo horario';
   if (!r || r.ld || routeId.startsWith('10T')) return 'Renfe GTFS-RT (en vivo) y horario';
   return 'CRTM (en vivo) y horario';
 }
