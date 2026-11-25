@@ -1406,7 +1406,14 @@ export const hhmm = (d: Date) =>
 export type LiveStatus =
   | { kind: 'waiting'; label: string; waitedMs: number }
   | { kind: 'timeout'; label: string; timetable: boolean }
-  | { kind: 'fresh'; label: string; fetchedAt: number; now: number };
+  | {
+      kind: 'fresh';
+      label: string;
+      fetchedAt: number;
+      now: number;
+      anyLive: boolean; // some displayed departure is live
+      timetable: boolean;
+    };
 
 const ageNote = (ms: number) => {
   const secs = Math.floor(ms / 1000);
@@ -1424,14 +1431,36 @@ export function liveStatusText(s: LiveStatus): string {
   if (s.kind === 'timeout') {
     return `${s.label} no responde · ${s.timetable ? 'mostrando horario' : 'reintentando'}`;
   }
+  return freshText(s);
+}
+
+// The source answered: "en vivo" only when a displayed departure is live, else say it had
+// nothing for this stop (Renfe: for the shown trains).
+function freshText(s: Extract<LiveStatus, { kind: 'fresh' }>): string {
   const at = hhmm(new Date(s.fetchedAt));
-  return `en vivo · ${s.label} ${at}${ageNote(Math.max(0, s.now - s.fetchedAt))}`;
+  if (s.anyLive) {
+    return s.label === 'Renfe'
+      ? `datos en vivo ${at}`
+      : `en vivo · ${s.label} ${at}${ageNote(Math.max(0, s.now - s.fetchedAt))}`;
+  }
+  const none =
+    s.label === 'Renfe'
+      ? 'Renfe sin actualizaciones para estos trenes'
+      : `${s.label} sin tiempos para esta parada`;
+  return s.timetable ? `${none} · horario (${at})` : none;
 }
 
 {
   const t = Date.UTC(2026, 0, 15, 14, 44, 0); // 15:44 in Madrid
-  const fresh = (age: number) =>
-    liveStatusText({ kind: 'fresh', label: 'CRTM', fetchedAt: t, now: t + age });
+  const fresh = (age: number, anyLive = true, timetable = true, label = 'CRTM') =>
+    liveStatusText({
+      kind: 'fresh',
+      label,
+      fetchedAt: t,
+      now: t + age,
+      anyLive,
+      timetable,
+    });
   console.assert(
     liveStatusText({ kind: 'waiting', label: 'CRTM', waitedMs: 1500 }) ===
       'esperando datos en vivo…',
@@ -1454,6 +1483,20 @@ export function liveStatusText(s: LiveStatus): string {
   );
   console.assert(fresh(3000) === 'en vivo · CRTM 15:44', 'fresh');
   console.assert(fresh(40_000) === 'en vivo · CRTM 15:44 (hace 40 s)', '40 s old');
+  console.assert(
+    fresh(3000, false) === 'CRTM sin tiempos para esta parada · horario (15:44)',
+    'answered, none live, timetable',
+  );
+  console.assert(
+    fresh(3000, false, false, 'EMT') === 'EMT sin tiempos para esta parada',
+    'answered, none live, no timetable',
+  );
+  console.assert(
+    fresh(3000, false, true, 'Renfe') ===
+      'Renfe sin actualizaciones para estos trenes · horario (15:44)',
+    'Renfe answered, none live',
+  );
+  console.assert(fresh(3000, true, true, 'Renfe') === 'datos en vivo 15:44', 'Renfe live');
 }
 
 // "20261224" -> "24.12."

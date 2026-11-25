@@ -126,7 +126,7 @@ const renfeFailure = (err: unknown) => {
 // Live feeds: failures keep the previous data.
 function useRealtime(active: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
-  const [status, setStatus] = useState('Cargando…');
+  const [status, setStatus] = useState<Status>('Cargando…');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -137,7 +137,9 @@ function useRealtime(active: boolean) {
       const offline = trips.offlineSince ?? alerts.offlineSince;
       setRt({ trips: trips.data, alerts: parseAlerts(alerts.data), offline });
       setStatus(
-        offline ? `sin conexión · desde ${hhmm(offline)}` : `datos en vivo ${hhmm(new Date())}`,
+        offline
+          ? `sin conexión · desde ${hhmm(offline)}`
+          : { label: 'Renfe', fetchedAt: Date.now(), timetable: true },
       );
     } catch (err) {
       setStatus(renfeFailure(err));
@@ -152,12 +154,19 @@ function useRealtime(active: boolean) {
   }, [load]);
   usePolling(active, loadedAt, load, setLoadedAt, REFRESH_MS);
 
-  return { ...rt, status, setStatus, loadedAt, loading, load };
+  const statusText = (anyLive: boolean) => resolveStatus(status, Date.now(), anyLive);
+  return { ...rt, statusText, setStatus, loadedAt, loading, load };
 }
 
 // Status of a CRTM/EMT pane: plain text, or a fresh answer whose age is worked out when shown.
-type Fresh = { label: string; fetchedAt: number };
+type Fresh = { label: string; fetchedAt: number; timetable: boolean };
 type Status = string | Fresh;
+
+// `anyLive`: some displayed departure is live (else the answer had nothing for this stop).
+const resolveStatus = (status: Status, now: number, anyLive: boolean) =>
+  typeof status === 'string'
+    ? status
+    : liveStatusText({ kind: 'fresh', ...status, now, anyLive });
 
 // While loading: "esperando datos en vivo…", counting per second after 2 s; otherwise the status
 // ("(hace N s)" follows the clock). Ticks only while the pane is active.
@@ -173,23 +182,22 @@ function useStatusText(
   label: string,
 ) {
   const now = useNow(statusTick(active, loadingSince !== null));
-  if (loadingSince !== null) {
+  return (anyLive: boolean) => {
+    if (loadingSince === null) return resolveStatus(status, now, anyLive);
     return liveStatusText({
       kind: 'waiting',
       label,
       waitedMs: Math.max(0, now - loadingSince),
     });
-  }
-  if (typeof status === 'string') return status;
-  return liveStatusText({ kind: 'fresh', ...status, now });
+  };
 }
 
 type Feed = { offlineSince: Date | null; fetchedAt: number };
 
-const freshStatus = (label: string, feed: Feed): Status =>
+const freshStatus = (label: string, feed: Feed, timetable: boolean): Status =>
   feed.offlineSince
     ? `sin conexión · ${label} ${hhmm(feed.offlineSince)}`
-    : { label, fetchedAt: feed.fetchedAt };
+    : { label, fetchedAt: feed.fetchedAt, timetable };
 
 // "en vivo · CRTM 10:05" / "sin conexión · CRTM 10:05" (copy from that time) / "solo horario"
 // (Metro has no timetable: "sin datos en vivo").
@@ -198,7 +206,7 @@ function crtmStatus(rows: CrtmRow[], feed: Feed, timetable: boolean): Status {
     const none = timetable ? 'solo horario' : 'sin datos en vivo';
     return feed.offlineSince ? `sin conexión · ${none}` : none;
   }
-  return freshStatus('CRTM', feed);
+  return freshStatus('CRTM', feed, timetable);
 }
 
 const crtmFailure = (err: unknown, timetable: boolean): Status => {
@@ -239,7 +247,7 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
 
   return {
     rows: got?.id === stopId ? got.rows : null,
-    status: useStatusText(status, active, loadingSince, 'CRTM'),
+    statusText: useStatusText(status, active, loadingSince, 'CRTM'),
     setStatus,
     loadedAt,
     loading: loadingSince !== null,
@@ -257,7 +265,7 @@ async function tryEmt(stopId: string): Promise<EmtTry> {
     const feed = await fetchEmt(stopId);
     const rows = parseEmt(feed.data, new Date());
     const alerts = parseEmtIncidents(feed.data, new Date());
-    return rows.length ? { rows, status: freshStatus('EMT', feed), alerts } : null;
+    return rows.length ? { rows, status: freshStatus('EMT', feed, false), alerts } : null;
   } catch (err) {
     return tryFailure(err);
   }
@@ -268,7 +276,7 @@ async function tryCrtm(stopId: string): Promise<EmtTry> {
   try {
     const feed = await fetchCrtm(`6_${stopId.replace(/^emt_/, '')}`);
     const rows = emtFromCrtm(parseCrtm(feed.data, new Date()));
-    return rows.length ? { rows, status: freshStatus('CRTM', feed), alerts: [] } : null;
+    return rows.length ? { rows, status: freshStatus('CRTM', feed, false), alerts: [] } : null;
   } catch (err) {
     return tryFailure(err);
   }
@@ -315,7 +323,7 @@ function useEmt(stopId: string, active: boolean) {
   return {
     rows: got?.id === stopId ? got.rows : null,
     alerts: got?.id === stopId ? got.alerts : [],
-    status: useStatusText(status, active, loadingSince, 'EMT'),
+    statusText: useStatusText(status, active, loadingSince, 'EMT'),
     setStatus,
     loadedAt,
     loading: loadingSince !== null,
@@ -680,6 +688,7 @@ function Departures({
     metro: isMetro,
   });
   const renfeStop = !useCrtmFeed && !isEmt;
+  const statusText = rt.statusText(deps.some(d => d.live));
   const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
@@ -816,7 +825,7 @@ function Departures({
       )}
 
       <p className="status">
-        {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now), !renfeStop)])}
+        {statusLine([error, depsError, statusText, expiryNote(tt, new Date(now), !renfeStop)])}
       </p>
     </>
   );
