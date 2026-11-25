@@ -23,6 +23,7 @@ import {
 } from './data.ts';
 import {
   applyRealtime,
+  compareLines,
   daysUntil,
   emtDepartures,
   emtFromCrtm,
@@ -348,15 +349,21 @@ function useEmt(stopId: string, active: boolean) {
 
 const groupKey = (d: Departure) => `${d.line}|${d.dest}`;
 
-// Lines by next departure; each group keeps its own departures in time order.
-function groupDepartures(deps: Departure[]) {
+// Lines in fixed natural order (line, then destination) so groups don't jump on refresh;
+// each group keeps its own departures in time order. Destination is the displayed name.
+function groupDepartures(deps: Departure[], nameOf: (dest: string) => string) {
   const groups = new Map<string, Departure[]>();
   for (const d of deps) {
     const list = groups.get(groupKey(d)) ?? [];
     list.push(d);
     groups.set(groupKey(d), list);
   }
-  return [...groups.entries()];
+  return [...groups.entries()].sort(([, a], [, b]) =>
+    compareLines(
+      { line: a[0].line, dest: nameOf(a[0].dest) },
+      { line: b[0].line, dest: nameOf(b[0].dest) },
+    ),
+  );
 }
 
 function DepartureRow({ d, now }: { d: Departure; now: number }) {
@@ -752,7 +759,8 @@ function Departures({
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
   const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
   const board = useAlertBoard(alerts, routeIds, lines);
-  const groups = groupDepartures(deps);
+  const destName = (id: string) => stopById.get(id)?.name ?? id;
+  const groups = groupDepartures(deps, destName);
   // From a line's stop list: select the stop (not saved) and return the pane to the top.
   const showStop = (s: Saved, el: HTMLElement, lineKey: string) => {
     onJump({ id: s.id, name: s.name }, lineKey);
@@ -866,7 +874,7 @@ function Departures({
           lineKey={key}
           defaultOpen={openLine === key}
           stopId={selected.id}
-          destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
+          destName={destName(list[0].dest)}
           hasAlert={board.marks(list[0].routeId, list[0].line)}
           now={now}
           onSelect={showStop}

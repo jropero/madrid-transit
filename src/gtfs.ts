@@ -1901,3 +1901,31 @@ console.assert(
   })(),
   'typicalGaps: median gap per destination, single departures ignored',
 );
+
+// Natural order for line groups: line (C2 < C10, 10 < 421), then destination as shown
+// (without "Madrid-"); accents ignored.
+export function compareLines(
+  a: { line: string; dest: string },
+  b: { line: string; dest: string },
+) {
+  const opts = { numeric: true, sensitivity: 'base' } as const;
+  return (
+    a.line.localeCompare(b.line, 'es', opts) ||
+    short(a.dest).localeCompare(short(b.dest), 'es', opts)
+  );
+}
+console.assert(
+  (() => {
+    const l = (line: string, dest = 'x') => ({ line, dest });
+    return (
+      compareLines(l('C2'), l('C10')) < 0 &&
+      compareLines(l('C4a'), l('C4b')) < 0 &&
+      compareLines(l('10'), l('421')) < 0 &&
+      compareLines(l('421'), l('10')) > 0 &&
+      compareLines(l('C1', 'Álcala'), l('C1', 'Béjar')) < 0 &&
+      compareLines(l('C1', 'a'), l('C1', 'A')) === 0 &&
+      compareLines(l('C3', 'Madrid-Chamartín-Clara Campoamor'), l('C3', 'Aranjuez')) > 0
+    );
+  })(),
+  'compareLines: natural line order, then destination',
+);
