@@ -10,7 +10,7 @@ Next Renfe Cercanías, interurban bus and light rail (Metro Ligero, Tranvía de 
 - **Interurban buses (CRTM):** ~6,600 stops and 354 lines from the national NAP feed. Timetable plus CRTM stop times (see Data sources); no alerts for buses (Renfe stops keep delays and alerts). Search shows the stop code and street to tell the two sides of a road apart.
 - **Saved stops:** Atocha and Sol are preset. Add stops by name or stop code search (accent-insensitive) or **near me**.
 - **Offline:** the timetable is local, so departures work fully offline; the last live data is kept.
-- **Metro UI:** swipe pivot, app bar, tilt on press, 20 accent colours, Selawik font, Fluent icons.
+- **Metro UI:** swipe pivot, app bar, tilt on press, light or dark theme (automatic by default, switchable in settings), 20 accent colours, Selawik font, Fluent icons.
 
 Notes for coding agents are in [AGENTS.md](AGENTS.md).
 

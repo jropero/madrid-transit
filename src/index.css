@@ -29,6 +29,8 @@
   --on-accent: #fff;
   --bus: #647687;
   --late: #f0a30a;
+  --bad: #e51400;
+  --on-bad: #fff;
   --gutter: 24px;
   --t-pivot: 48px;
   --t-title: 32px;
@@ -37,6 +39,33 @@
   --t-small: 14px;
   --t-tiny: 11px;
 
+  color-scheme: dark;
+}
+
+/* Light theme: forced (data-theme="light") or automatic (no data-theme + OS preference). */
+:root[data-theme='light'] {
+  --bg: #fff;
+  --fg: #000;
+  --muted: #595959;
+  --bar: #e6e6e6;
+  --late: #a85c00;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #fff;
+    --fg: #000;
+    --muted: #595959;
+    --bar: #e6e6e6;
+    --late: #a85c00;
+
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='dark'] {
   color-scheme: dark;
 }
 
@@ -759,8 +788,8 @@ p.next {
 }
 
 .tag.bad {
-  color: #fff;
-  background: #e51400;
+  color: var(--on-bad);
+  background: var(--bad);
 }
 
 .dep .tag.bad {
@@ -774,6 +803,19 @@ p.next {
 }
 
 /* Settings */
+.themes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 32px;
+}
+
+.themes .btn[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
 .swatches {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
