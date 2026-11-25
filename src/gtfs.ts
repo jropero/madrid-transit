@@ -511,12 +511,16 @@ function crtmSpans(rows: CrtmRow[]): Map<string, { k: number; last: number }> {
   return spans;
 }
 
+// CRTM times are rounded to the whole minute, so a live row at hh:mm stands for timetable
+// times up to hh:mm:59.
+const CRTM_PRECISION_MS = 59_000;
+
 // Timetable rows of one covered route that its live rows replace: everything planned up to the
 // latest live time, and at least k rows (each live bus consumes one scheduled trip, so a late
 // bus whose slot is earlier than its live time, or an early one, still removes its own slot).
 function replacedByLive(rows: Departure[], s: { k: number; last: number }): Departure[] {
   const sorted = [...rows].sort((a, b) => a.planned.getTime() - b.planned.getTime());
-  const upToLast = sorted.filter(d => d.planned.getTime() <= s.last).length;
+  const upToLast = sorted.filter(d => d.planned.getTime() <= s.last + CRTM_PRECISION_MS).length;
   return sorted.slice(0, Math.max(upToLast, s.k));
 }
 
@@ -661,6 +665,38 @@ console.assert(
     );
   })(),
   'mergeCrtm: live rows replace their timetable slots (late, early, several), far-future keeps it',
+);
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T15:02:00Z');
+    const at = (h: string) => `2026-11-25T${h}Z`;
+    const row = (h: string): CrtmRow => ({
+      when: new Date(at(h)),
+      routeId: '461',
+      line: '461',
+      dest: 'X',
+      tram: false,
+      metro: false,
+      issue: '1',
+    });
+    // Minute-rounded live 15:06 and 15:15 replace the 15:06:20 and 15:15:30 timetable rows.
+    const out = mergeCrtm(
+      [
+        testDep('461', at('15:06:20')),
+        testDep('461', at('15:15:30')),
+        testDep('461', at('15:24:10')),
+      ],
+      [row('15:06:00'), row('15:15:00')],
+      {},
+      now,
+    );
+    return (
+      out
+        .map(d => `${d.expected.toISOString().slice(11, 16)}${d.live ? 'L' : ''}`)
+        .join(' ') === '15:06L 15:15L 15:24'
+    );
+  })(),
+  'mergeCrtm: minute-rounded live times replace timetable rows with seconds in the same minute',
 );
 
 // EMT MobilityLabs arrivals (via rt.php): code "00", rows at data[0].Arrive. estimateArrive is
