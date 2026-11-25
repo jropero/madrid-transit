@@ -616,6 +616,13 @@ p.next {
   margin-top: 16px;
 }
 
+.status-note {
+  font-size: var(--t-small);
+  color: var(--muted);
+  margin-top: 4px;
+  opacity: 0.8;
+}
+
 .results li .dist {
   color: var(--muted);
   font-size: var(--t-small);

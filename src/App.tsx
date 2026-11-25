@@ -18,6 +18,7 @@ import {
   isOffline,
   warmOffline,
   isTimeout,
+  upstreamOf,
   loadAllStops,
   loadStopDeps,
   loadTimetable,
@@ -37,6 +38,7 @@ import {
   hhmm,
   isBus,
   liveStatusText,
+  upstreamText,
   loadSaved,
   locate,
   madridDate,
@@ -53,6 +55,7 @@ import {
   townsOf,
   upcoming,
   type Alert,
+  type UpstreamError,
   type CrtmRow,
   type EmtRow,
   type StopFile,
@@ -136,6 +139,14 @@ function usePolling(
   }, [active, load]);
 }
 
+// Second status line: why the live feed in use is failing ('' while healthy).
+const feedNote = (label: string, feed: { upstream?: UpstreamError }) =>
+  feed.upstream ? upstreamText(label, feed.upstream) : '';
+const errNote = (label: string, err: unknown) => {
+  const u = upstreamOf(err);
+  return u ? upstreamText(label, u) : '';
+};
+
 // Renfe feed failure: a timeout falls back to the timetable.
 const renfeFailure = (err: unknown) => {
   if (isTimeout(err))
@@ -149,6 +160,7 @@ const renfeFailure = (err: unknown) => {
 function useRealtime(active: boolean, withLd: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
   const [status, setStatus] = useState<Status>('Cargando…');
+  const [note, setNote] = useState('');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -168,8 +180,10 @@ function useRealtime(active: boolean, withLd: boolean) {
           ? `sin conexión · desde ${hhmm(offline)}`
           : { label: 'Renfe', fetchedAt: Date.now(), timetable: true },
       );
+      setNote(feedNote('Renfe', trips) || feedNote('Renfe', alerts));
     } catch (err) {
       setStatus(renfeFailure(err));
+      setNote(errNote('Renfe', err));
     } finally {
       setLoading(false);
       setLoadedAt(Date.now());
@@ -182,7 +196,7 @@ function useRealtime(active: boolean, withLd: boolean) {
   usePolling(active, loadedAt, load, setLoadedAt, REFRESH_MS);
 
   const statusText = (anyLive: boolean) => resolveStatus(status, Date.now(), anyLive);
-  return { ...rt, statusText, setStatus, loadedAt, loading, load };
+  return { ...rt, statusText, note, setStatus, loadedAt, loading, load };
 }
 
 // Status of a CRTM/EMT pane: plain text, or a fresh answer whose age is worked out when shown.
@@ -247,6 +261,7 @@ const crtmFailure = (err: unknown, timetable: boolean): Status => {
 function useCrtm(stopId: string, active: boolean, timetable: boolean, file: StopFile | null) {
   const [got, setGot] = useState<{ id: string; rows: CrtmRow[] } | null>(null);
   const [status, setStatus] = useState<Status>('Cargando…');
+  const [note, setNote] = useState('');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [loadingSince, setLoadingSince] = useState<number | null>(null);
 
@@ -258,9 +273,11 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
       const rows = await directCrtm(parsed, file, stopId);
       setGot({ id: stopId, rows });
       setStatus(crtmStatus(rows, feed, timetable));
+      setNote(feedNote('CRTM', feed));
     } catch (err) {
       setGot({ id: stopId, rows: [] });
       setStatus(crtmFailure(err, timetable));
+      setNote(errNote('CRTM', err));
     } finally {
       setLoadingSince(null);
       setLoadedAt(Date.now());
@@ -275,6 +292,7 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
   return {
     rows: got?.id === stopId ? got.rows : null,
     statusText: useStatusText(status, active, loadingSince, 'CRTM'),
+    note,
     setStatus,
     loadedAt,
     loading: loadingSince !== null,
@@ -282,19 +300,25 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
   };
 }
 
-type EmtLoad = { rows: EmtRow[]; status: Status; alerts: Alert[] };
-type EmtTry = EmtLoad | 'timeout' | null;
+type EmtLoad = { rows: EmtRow[]; status: Status; alerts: Alert[]; note: string };
+type EmtMiss = { timeout: boolean; note: string };
+type EmtTry = EmtLoad | EmtMiss;
 
-const tryFailure = (err: unknown): EmtTry => (isTimeout(err) ? 'timeout' : null);
+const tryFailure = (label: string, err: unknown): EmtMiss => ({
+  timeout: isTimeout(err),
+  note: errNote(label, err),
+});
 
 async function tryEmt(stopId: string): Promise<EmtTry> {
   try {
     const feed = await fetchEmt(stopId);
     const rows = parseEmt(feed.data, new Date());
     const alerts = parseEmtIncidents(feed.data, new Date());
-    return rows.length ? { rows, status: freshStatus('EMT', feed, false), alerts } : null;
+    const note = feedNote('EMT', feed);
+    if (!rows.length) return { timeout: false, note };
+    return { rows, status: freshStatus('EMT', feed, false), alerts, note };
   } catch (err) {
-    return tryFailure(err);
+    return tryFailure('EMT', err);
   }
 }
 
@@ -303,27 +327,30 @@ async function tryCrtm(stopId: string): Promise<EmtTry> {
   try {
     const feed = await fetchCrtm(`6_${stopId.replace(/^emt_/, '')}`);
     const rows = emtFromCrtm(parseCrtm(feed.data, new Date()));
-    return rows.length ? { rows, status: freshStatus('CRTM', feed, false), alerts: [] } : null;
+    const note = feedNote('CRTM', feed);
+    if (!rows.length) return { timeout: false, note };
+    return { rows, status: freshStatus('CRTM', feed, false), alerts: [], note };
   } catch (err) {
-    return tryFailure(err);
+    return tryFailure('CRTM', err);
   }
 }
 
-const isLoad = (t: EmtTry): t is EmtLoad => t !== null && t !== 'timeout';
+const isLoad = (t: EmtTry): t is EmtLoad => 'rows' in t;
 
 async function loadEmtRows(stopId: string): Promise<EmtLoad> {
   const emt = await tryEmt(stopId);
   if (isLoad(emt)) return emt;
   const crtm = await tryCrtm(stopId);
-  if (isLoad(crtm)) return crtm;
-  const timedOut = [
+  if (isLoad(crtm)) return { ...crtm, note: emt.note || crtm.note };
+  const misses: [string, EmtMiss][] = [
     ['EMT', emt],
     ['CRTM', crtm],
-  ].find(([, t]) => t === 'timeout');
+  ];
+  const timedOut = misses.find(([, t]) => t.timeout);
   const status = timedOut
-    ? liveStatusText({ kind: 'timeout', label: String(timedOut[0]), timetable: false })
+    ? liveStatusText({ kind: 'timeout', label: timedOut[0], timetable: false })
     : 'sin datos en vivo';
-  return { rows: [], status, alerts: [] };
+  return { rows: [], status, alerts: [], note: emt.note || crtm.note };
 }
 
 // EMT stop arrivals, every 30 s while `active` (rt.php caches 30 s).
@@ -351,6 +378,7 @@ function useEmt(stopId: string, active: boolean) {
     rows: got?.id === stopId ? got.rows : null,
     alerts: got?.id === stopId ? got.alerts : [],
     statusText: useStatusText(status, active, loadingSince, 'EMT'),
+    note: got?.id === stopId ? got.note : '',
     setStatus,
     loadedAt,
     loading: loadingSince !== null,
@@ -1048,6 +1076,7 @@ function Departures({
       <p className="status">
         {statusLine([error, depsError, statusText, expiryNote(tt, new Date(now), !renfeStop)])}
       </p>
+      {rt.note && <p className="status-note">{rt.note}</p>}
     </>
   );
 }

@@ -15,6 +15,7 @@ import {
   type Stop,
   type StopTimeUpdate,
   type TripUpdates,
+  type UpstreamError,
   type VehiclePositions,
   type VehicleStatus,
 } from './gtfs.ts';
@@ -39,7 +40,49 @@ const dataAgeMs = (res: Response) => {
   return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
 };
 
-const getLive = async <T>(url: string): Promise<{ data: T; fetchedAt: number }> => {
+// A live feed failed: HTTP status (0 = none) and kind (timeout | network | http | invalid | html).
+export class FeedError extends Error {
+  readonly upstream: UpstreamError;
+  constructor(upstream: UpstreamError, message: string) {
+    super(message);
+    this.upstream = upstream;
+  }
+}
+
+// `X-Upstream-Error: <code> <kind>` (rt.php): why its own upstream call failed.
+const upstreamHeader = (res: Response): UpstreamError | undefined => {
+  const m = /^(\d{1,3}) (timeout|network|http|invalid|html)$/.exec(
+    res.headers.get('X-Upstream-Error') ?? '',
+  );
+  return m ? { code: Number(m[1]), kind: m[2] } : undefined;
+};
+console.assert(
+  upstreamHeader(new Response('', { headers: { 'X-Upstream-Error': '200 html' } }))?.kind ===
+    'html' && upstreamHeader(new Response(''))?.code === undefined,
+  'upstreamHeader',
+);
+
+// The body of a successful response: JSON, or a FeedError of kind html / invalid (dev has no
+// rt.php to check the upstream for us).
+const readJson = async <T>(res: Response, url: string): Promise<T> => {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const kind = text.trimStart().startsWith('<') ? 'html' : 'invalid';
+    throw new FeedError({ code: res.status, kind }, `invalid response (${kind}): ${url}`);
+  }
+};
+
+// What went wrong with a failed live fetch, for the second status line (offline: nothing).
+export const upstreamOf = (err: unknown): UpstreamError | null => {
+  if (err instanceof FeedError) return err.upstream;
+  return isTimeout(err) ? { code: 0, kind: 'timeout' } : null;
+};
+
+const getLive = async <T>(
+  url: string,
+): Promise<{ data: T; fetchedAt: number; upstream?: UpstreamError }> => {
   const ctl = new AbortController();
   const timer = setTimeout(
     () => ctl.abort(new DOMException('no response', 'TimeoutError')),
@@ -47,9 +90,13 @@ const getLive = async <T>(url: string): Promise<{ data: T; fetchedAt: number }> 
   );
   try {
     const res = await fetch(url, { signal: ctl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+    const upstream = upstreamHeader(res);
+    if (!res.ok) {
+      const e = upstream ?? { code: res.status, kind: 'http' };
+      throw new FeedError(e, `HTTP ${res.status}: ${url}`);
+    }
     const fetchedAt = Date.now() - dataAgeMs(res);
-    return { data: (await res.json()) as T, fetchedAt };
+    return { data: await readJson<T>(res, url), fetchedAt, upstream };
   } finally {
     clearTimeout(timer);
   }
@@ -130,7 +177,13 @@ const slimTrips = (f: TripUpdates): TripUpdates => ({
 export const isOffline = (err: unknown) => err instanceof TypeError;
 
 // fetchedAt: when the answer was fetched upstream (now minus X-Data-Age; the copy time offline).
-type Feed<T> = { data: T; offlineSince: Date | null; fetchedAt: number };
+// upstream: set when rt.php served an old copy because its own upstream call failed.
+export type Feed<T> = {
+  data: T;
+  offlineSince: Date | null;
+  fetchedAt: number;
+  upstream?: UpstreamError;
+};
 
 // Online: fetch and remember. No network: the last stored copy (offlineSince = when it was fetched).
 async function fetchFeed<T, R = T>(
@@ -143,7 +196,7 @@ async function fetchFeed<T, R = T>(
     const live = await getLive<R>(`${base}rt.php?${query}`);
     const data = slim(live.data);
     saveJson(key, { at: Date.now(), data });
-    return { data, offlineSince: null, fetchedAt: live.fetchedAt };
+    return { data, offlineSince: null, fetchedAt: live.fetchedAt, upstream: live.upstream };
   } catch (err) {
     const c = loadJson<{ at: number; data: T } | null>(key, null);
     if (isOffline(err) && c)

@@ -1788,6 +1788,51 @@ export type LiveStatus =
       timetable: boolean;
     };
 
+// Why a live feed failed (rt.php `X-Upstream-Error`, or worked out by the client in dev):
+// HTTP status (0 = none) and kind: timeout | network | http | invalid | html.
+export type UpstreamError = { code: number; kind: string };
+
+const HTTP_MEANING: Record<number, string> = {
+  400: 'petición no válida',
+  401: 'acceso denegado',
+  403: 'acceso denegado',
+  404: 'no encontrado',
+  429: 'demasiadas peticiones',
+  503: 'servicio no disponible',
+};
+
+const httpMeaning = (code: number) =>
+  HTTP_MEANING[code] ?? (code >= 500 ? 'error del servidor' : 'error');
+
+// Second status line: "CRTM: HTTP 502 · error del servidor".
+export function upstreamText(label: string, e: UpstreamError): string {
+  const http = `${label}: HTTP ${e.code}`;
+  if (e.kind === 'timeout') return `${label}: sin respuesta (tiempo agotado)`;
+  if (e.kind === 'network') return `${label}: sin respuesta (error de red)`;
+  if (e.kind === 'html') return `${http} · respuesta no válida (HTML)`;
+  if (e.kind === 'invalid') return `${http} · respuesta no válida`;
+  return `${http} · ${httpMeaning(e.code)}`;
+}
+console.assert(
+  upstreamText('CRTM', { code: 200, kind: 'html' }) ===
+    'CRTM: HTTP 200 · respuesta no válida (HTML)' &&
+    upstreamText('CRTM', { code: 200, kind: 'invalid' }) ===
+      'CRTM: HTTP 200 · respuesta no válida' &&
+    upstreamText('CRTM', { code: 502, kind: 'http' }) ===
+      'CRTM: HTTP 502 · error del servidor' &&
+    upstreamText('Renfe', { code: 0, kind: 'timeout' }) ===
+      'Renfe: sin respuesta (tiempo agotado)' &&
+    upstreamText('Renfe', { code: 0, kind: 'network' }) ===
+      'Renfe: sin respuesta (error de red)' &&
+    upstreamText('EMT', { code: 401, kind: 'http' }) === 'EMT: HTTP 401 · acceso denegado' &&
+    upstreamText('EMT', { code: 503, kind: 'http' }) ===
+      'EMT: HTTP 503 · servicio no disponible' &&
+    upstreamText('EMT', { code: 429, kind: 'http' }) ===
+      'EMT: HTTP 429 · demasiadas peticiones' &&
+    upstreamText('EMT', { code: 418, kind: 'http' }) === 'EMT: HTTP 418 · error',
+  'upstreamText',
+);
+
 const ageNote = (ms: number) => {
   const secs = Math.floor(ms / 1000);
   if (secs < 10) return '';

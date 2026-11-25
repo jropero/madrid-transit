@@ -15,6 +15,9 @@
 //   - Upstream budget per minute (EMT_BUDGET / CRTM_BUDGET below); over it -> stale cache or 503.
 //   - A failed stop is remembered NEG_TTL s (negative cache) so retries do not hit the upstream.
 //   - Per client: IP_LIMIT requests/min (only a SHA-256 of IP+minute is stored) -> 429.
+// Why an upstream call failed is kept per cache file (uerr-<cache name>, cleared by the next
+// success) and sent as `X-Upstream-Error: <http code, 0 = none> <timeout|network|http|invalid|html>`
+// with a stale copy and with the 502/503 answers (the client shows it under the status).
 
 header('X-Content-Type-Options: nosniff');
 
@@ -30,6 +33,7 @@ function fail(int $code, string $msg, int $retry = 0): void {
     }
     http_response_code($code);
     header('Content-Type: application/json');
+    up_header();
     if ($retry > 0) {
         header('Retry-After: ' . $retry);
     }
@@ -139,6 +143,49 @@ function over_budget(): bool {
     return !empty($GLOBALS['over_budget']);
 }
 
+// ---------------------------------------------------------------- Upstream failure reason
+
+// Remembers why the last upstream call for the current cache file failed ("<code> <kind>").
+function up_fail(int $status, string $kind): void {
+    if (isset($GLOBALS['uerr_cache'])) {
+        state_write(state_file('uerr-' . basename($GLOBALS['uerr_cache'])), $status . ' ' . $kind, 0600);
+    }
+}
+
+function up_ok(): void {
+    if (isset($GLOBALS['uerr_cache'])) {
+        @unlink(state_file('uerr-' . basename($GLOBALS['uerr_cache'])));
+    }
+}
+
+// The remembered reason, only if it has the expected shape (it ends up in a header).
+function up_read(): ?string {
+    if (!isset($GLOBALS['uerr_cache'])) {
+        return null;
+    }
+    $v = @file_get_contents(state_file('uerr-' . basename($GLOBALS['uerr_cache'])));
+    return is_string($v) && preg_match('/^\d{1,3} (timeout|network|http|invalid|html)\z/', $v) === 1 ? $v : null;
+}
+
+function up_header(): void {
+    $v = up_read();
+    if ($v !== null) {
+        header('X-Upstream-Error: ' . $v);
+    }
+}
+
+// [status, kind] of a failed call: no status = timeout or network, non-2xx = http, a 2xx body that
+// is not JSON = html (starts with "<") or invalid.
+function up_classify(int $status, ?string $body, bool $timedOut): array {
+    if ($status === 0) {
+        return [0, $timedOut ? 'timeout' : 'network'];
+    }
+    if ($status < 200 || $status >= 300) {
+        return [$status, 'http'];
+    }
+    return [$status, $body !== null && strncmp(ltrim($body), '<', 1) === 0 ? 'html' : 'invalid'];
+}
+
 // Negative cache: the last failure of a stop as {"c": status, "m": message}, for NEG_TTL s.
 function neg_get(string $key): ?array {
     $file = state_file('neg-' . $key);
@@ -178,6 +225,7 @@ const EMT_HOST = 'https://openapi.emtmadrid.es/';
 // Returns [http status, body or null]; any other host is refused, and so is a call over the
 // per-minute EMT budget (counted here, right before the request).
 function emt_http(string $method, string $url, array $headers, ?string $body = null): array {
+    $GLOBALS['last_http'] = null;
     if (strpos($url, EMT_HOST) !== 0 || !budget_ok('emt', EMT_BUDGET)) {
         return [0, null];
     }
@@ -197,7 +245,9 @@ function emt_http(string $method, string $url, array $headers, ?string $body = n
         }
         $out = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $timedOut = curl_errno($ch) === 28; // CURLE_OPERATION_TIMEDOUT
         curl_close($ch);
+        $GLOBALS['last_http'] = [$status, is_string($out) ? $out : null, $timedOut];
         return [$status, is_string($out) ? $out : null];
     }
     $http = ['method' => $method, 'timeout' => http_timeout(), 'ignore_errors' => true, 'follow_location' => 0,
@@ -205,12 +255,22 @@ function emt_http(string $method, string $url, array $headers, ?string $body = n
     if ($body !== null) {
         $http['content'] = $body;
     }
+    $t0 = microtime(true);
     $out = @file_get_contents($url, false, stream_context_create(['http' => $http]));
+    $timedOut = $out === false && microtime(true) - $t0 >= http_timeout() - 0.5;
     $status = 0;
     if (isset($http_response_header[0]) && preg_match('#^HTTP/\S+ (\d{3})#', $http_response_header[0], $m)) {
         $status = (int) $m[1];
     }
+    $GLOBALS['last_http'] = [$status, is_string($out) ? $out : null, $timedOut];
     return [$status, is_string($out) ? $out : null];
+}
+
+// Remembers why the last EMT call failed (see up_classify).
+function emt_record(): void {
+    [$status, $body, $timedOut] = $GLOBALS['last_http'] ?? [0, null, false];
+    [$s, $k] = up_classify($status, $body, $timedOut);
+    up_fail($s, $k);
 }
 
 // A header value must be printable ASCII (space included, for passwords) with no CR/LF,
@@ -270,6 +330,7 @@ function emt_login(array $cfg, string $tokenFile): ?string {
     $j = $body !== null ? json_decode($body, true) : null;
     $code = is_array($j) ? ($j['code'] ?? '') : '';
     if (in_array($code, ['92', '89'], true)) {
+        emt_record();
         fail(502, 'emt login failed');
     }
     $d = $j['data'][0] ?? null;
@@ -330,6 +391,7 @@ function emt_fetch(string $stop, string $cache): void {
         }
     }
     if ($code === '00') {
+        up_ok();
         state_write($cache, (string) $body, 0600);
     } elseif (over_budget()) {
         if (!is_file($cache)) {
@@ -342,6 +404,7 @@ function emt_fetch(string $stop, string $cache): void {
         neg_set('emt-' . $stop, 404, 'emt stop not found');
         fail(404, 'emt stop not found');
     } else {
+        emt_record();
         neg_set('emt-' . $stop, 502, 'upstream unavailable');
         if (!is_file($cache)) {
             fail(502, 'upstream unavailable');
@@ -376,10 +439,19 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
         }
     } else {
         $ctx = stream_context_create(['http' => ['timeout' => http_timeout(), 'header' => "Accept: application/json\r\n"]]);
+        $t0 = microtime(true);
         $body = @file_get_contents($url, false, $ctx);
+        $status = 0;
+        if (isset($http_response_header[0]) && preg_match('#^HTTP/\S+ (\d{3})#', $http_response_header[0], $m)) {
+            $status = (int) $m[1];
+        }
         if ($body !== false && $body !== '' && json_decode($body) !== null) {
+            up_ok();
             state_write($cache, $body, 0600);
         } else {
+            $timedOut = $body === false && $status === 0 && microtime(true) - $t0 >= http_timeout() - 0.5;
+            [$s, $k] = up_classify($status, $body === false ? null : $body, $timedOut);
+            up_fail($s, $k);
             if ($neg !== null) {
                 neg_set($neg, 502, 'upstream unavailable');
             }
@@ -407,6 +479,7 @@ function serve_swr(string $cache, int $ttl, callable $refresh): void {
     }
     header('Content-Type: application/json');
     header('X-Data-Age: ' . $age);
+    up_header();
     // Only a copy still fresh may be held by the browser, and only for its remaining life.
     header('Cache-Control: ' . ($age < $ttl ? 'public, max-age=' . ($ttl - $age) : 'no-store'));
     readfile($cache);
@@ -461,4 +534,5 @@ if ($f === 'emt') {
 }
 
 rate_limit_ip();
+$GLOBALS['uerr_cache'] = $cache;
 serve_swr($cache, $ttl, $refresh);
