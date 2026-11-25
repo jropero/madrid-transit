@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
-import NextStops from './NextStops.tsx';
+import NextStops, { TrainPicker } from './NextStops.tsx';
 import Settings from './Settings.tsx';
 import { useLdEnabled } from './ld.ts';
 import Trail from './Trail.tsx';
@@ -431,7 +431,10 @@ function LineGroup({
   onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [picked, setPicked] = useState<string | null>(null);
   const head = list[0];
+  const followed = list.find(d => d.tripId === picked) ?? head;
+  const train = !head.bus && !head.emt && !head.metro;
   const tile = { '--tile': head.color, '--tile-text': head.text } as React.CSSProperties;
   const panel = `next-${head.routeId}-${head.tripId}`;
   return (
@@ -458,12 +461,22 @@ function LineGroup({
         </span>
       </button>
       {open && (
-        <NextStops
-          dep={head}
-          stopId={stopId}
-          id={panel}
-          onSelect={(s, el) => onSelect(s, el, lineKey)}
-        />
+        <>
+          {train && list.length > 1 && (
+            <TrainPicker
+              list={list.slice(0, MAX_PER_GROUP)}
+              selected={followed.tripId}
+              onPick={setPicked}
+            />
+          )}
+          <NextStops
+            key={followed.tripId}
+            dep={followed}
+            stopId={stopId}
+            id={panel}
+            onSelect={(s, el) => onSelect(s, el, lineKey)}
+          />
+        </>
       )}
     </section>
   );

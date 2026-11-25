@@ -1,6 +1,7 @@
 <?php
 // Whitelist proxy for upstreams that send no CORS headers; no other URL is reachable.
 //   ?f=trip_updates|trip_updates_LD|alerts  Renfe GTFS-RT JSON (LD = Media/Larga Distancia), cached 15 s.
+//   ?f=vehicle_positions|vehicle_positions_LD  Renfe train positions (follow view), same upstream and cache.
 //   ?f=crtm&stop=8_16578    CRTM stop times (undocumented website endpoint, may change or
 //                           break), cached 30 s per stop. `stop` must match ^(4|6|8|10)_\d{1,6}$.
 //   ?f=emt&stop=72          EMT Madrid MobilityLabs bus arrivals (needs ../../emt.json, outside the
@@ -437,7 +438,7 @@ if ($f === 'emt') {
     $refresh = function () use ($stop, $cache): void {
         emt_refresh($stop, $cache);
     };
-} elseif ($f === 'crtm' || in_array($f, ['trip_updates', 'trip_updates_LD', 'alerts'], true)) {
+} elseif ($f === 'crtm' || in_array($f, ['trip_updates', 'trip_updates_LD', 'alerts', 'vehicle_positions', 'vehicle_positions_LD'], true)) {
     if ($f === 'crtm') {
         $stop = check_stop('crtm', '/^(4|6|8|10)_\d{1,6}\z/');
         $url = 'https://www.crtm.es/widgets/api/GetStopsTimes.php?codStop=' . $stop . '&type=1&orderBy=2&stopTimesByIti=3';

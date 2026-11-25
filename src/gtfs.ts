@@ -86,14 +86,29 @@ export type Departure = {
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
 };
 
+// Per-stop update, slimmed to a delay (seconds) or an absolute time (unix seconds, a string).
+export type StopTimeUpdate = {
+  stopId?: string;
+  arrival?: { delay?: number; time?: string | number };
+  departure?: { delay?: number; time?: string | number };
+};
 export type TripUpdates = {
   entity?: {
     tripUpdate?: {
       trip?: { tripId?: string; scheduleRelationship?: string };
       delay?: number;
+      stopTimeUpdate?: StopTimeUpdate[];
     };
   }[];
 };
+export type VehicleStatus = 'STOPPED_AT' | 'INCOMING_AT' | 'IN_TRANSIT_TO';
+export type VehiclePosition = {
+  tripId?: string;
+  stopId?: string;
+  status?: VehicleStatus;
+  timestamp?: string | number;
+};
+export type VehiclePositions = { entity?: { vehicle?: VehiclePosition }[] };
 export type Alert = {
   id: string;
   routeIds: string[];
@@ -1718,6 +1733,127 @@ console.assert(
     );
   })(),
   'nextStops offsets, pickPattern: destination match, longest fallback, none',
+);
+
+// ---------------------------------------------------------------- Following a train
+
+// Planned time at every stop of the pattern, given when the train leaves `stopId`.
+export function plannedTimes(p: Pattern, stopId: string, at: Date): StopTime[] {
+  const i = stopIndex(p, stopId);
+  if (i < 0) return [];
+  return p.map(([id, off]) => ({ id, at: new Date(at.getTime() + (off - p[i][1]) * 1000) }));
+}
+
+const finite = (n: unknown) =>
+  n === undefined || !Number.isFinite(Number(n)) ? null : Number(n);
+
+// One stop-time update: its delay, else its absolute time minus the planned one.
+function updateDelay(u: StopTimeUpdate, plan: Date | undefined): number | null {
+  const t = u.departure ?? u.arrival;
+  const delay = finite(t?.delay);
+  if (delay !== null) return Math.round(delay);
+  const abs = finite(t?.time);
+  return abs === null || !plan ? null : Math.round(abs - plan.getTime() / 1000);
+}
+
+// Delay (seconds) per stop from a trip update's stop-time updates: the feed's delay, or its
+// absolute time minus the planned one (`planned`: stop id -> planned time).
+export function stopDelays(
+  updates: StopTimeUpdate[] | undefined,
+  planned: Map<string, Date>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const u of updates ?? []) {
+    const secs = updateDelay(u, u.stopId ? planned.get(u.stopId) : undefined);
+    if (u.stopId && secs !== null) out.set(u.stopId, secs);
+  }
+  return out;
+}
+
+export type TripTime = { id: string; planned: Date; expected: Date | null };
+
+// Expected time per stop: planned plus the stop's own delay, else the trip delay, else unknown.
+export function expectedTimes(
+  times: StopTime[],
+  delays: Map<string, number>,
+  tripDelay: number | null,
+): TripTime[] {
+  return times.map(({ id, at }) => {
+    const secs = delays.get(id) ?? tripDelay;
+    return {
+      id,
+      planned: at,
+      expected: secs === null ? null : new Date(at.getTime() + secs * 1000),
+    };
+  });
+}
+
+export type Progress = { index: number; state: 'at' | 'arriving' | 'between' };
+const PROGRESS: Record<VehicleStatus, Progress['state']> = {
+  STOPPED_AT: 'at',
+  INCOMING_AT: 'arriving',
+  IN_TRANSIT_TO: 'between',
+};
+
+// Where the train is in the pattern: index of the stop it is at / arriving at / heading to
+// (between = past the previous stop); null when the position's stop is not in the pattern.
+export function trainProgress(p: Pattern, pos: VehiclePosition | null): Progress | null {
+  const state = pos?.status ? PROGRESS[pos.status] : undefined;
+  const index = pos?.stopId ? stopIndex(p, pos.stopId) : -1;
+  return state && index >= 0 ? { index, state } : null;
+}
+
+export const tripEntry = (feed: TripUpdates | null, tripId: string) => {
+  const u = feed?.entity?.find(e => e.tripUpdate?.trip?.tripId === tripId)?.tripUpdate;
+  if (!u) return null;
+  const delay = u.delay === undefined ? NaN : Number(u.delay);
+  return { delay: Number.isFinite(delay) ? delay : null, stops: u.stopTimeUpdate };
+};
+
+export const findPosition = (feed: VehiclePositions | null, tripId: string) =>
+  feed?.entity?.find(e => e.vehicle?.tripId === tripId)?.vehicle ?? null;
+
+console.assert(
+  (() => {
+    const p: Pattern = [
+      ['a', 0],
+      ['b', 60],
+      ['c', 180],
+    ];
+    const t = plannedTimes(p, 'b', new Date('2026-11-25T09:00:00Z'));
+    const planned = new Map(t.map(x => [x.id, x.at]));
+    const d = stopDelays(
+      [
+        { stopId: 'a', departure: { delay: 120 } },
+        { stopId: 'b', arrival: { time: '1795597320' } },
+        { stopId: 'zz', arrival: { delay: 5 } },
+        { stopId: 'c' },
+      ],
+      planned,
+    );
+    const e = expectedTimes(t, d, 60);
+    const pos = (stopId: string, status: VehicleStatus) => ({ stopId, status });
+    return (
+      t[0].at.toISOString() === '2026-11-25T08:59:00.000Z' &&
+      t[2].at.toISOString() === '2026-11-25T09:02:00.000Z' &&
+      d.get('a') === 120 &&
+      d.get('b') === 120 &&
+      d.get('zz') === 5 &&
+      !d.has('c') &&
+      e[2].expected?.toISOString() === '2026-11-25T09:03:00.000Z' &&
+      expectedTimes(t, d, null)[2].expected === null &&
+      trainProgress(p, pos('b', 'STOPPED_AT'))?.state === 'at' &&
+      trainProgress(p, pos('c', 'INCOMING_AT'))?.index === 2 &&
+      trainProgress(p, pos('c', 'IN_TRANSIT_TO'))?.state === 'between' &&
+      trainProgress(p, pos('zz', 'STOPPED_AT')) === null &&
+      trainProgress(p, null) === null &&
+      tripEntry({ entity: [{ tripUpdate: { trip: { tripId: 'x' }, delay: 30 } }] }, 'x')
+        ?.delay === 30 &&
+      tripEntry(null, 'x') === null &&
+      findPosition({ entity: [{ vehicle: { tripId: 'x' } }] }, 'y') === null
+    );
+  })(),
+  'follow train: plannedTimes, stopDelays, expectedTimes, trainProgress, feed lookups',
 );
 
 // ---------------------------------------------------------------- CRTM direction assignment

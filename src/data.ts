@@ -13,7 +13,10 @@ import {
   type StopFile,
   type RouteMap,
   type Stop,
+  type StopTimeUpdate,
   type TripUpdates,
+  type VehiclePositions,
+  type VehicleStatus,
 } from './gtfs.ts';
 
 const base = import.meta.env.BASE_URL;
@@ -102,6 +105,14 @@ const perStop = new Map<string, Promise<StopFile>>();
 export const loadStopDeps = (id: string) =>
   memo(perStop, id, () => getJson<StopFile>(`${base}data/stop/${encodeURIComponent(id)}.json`));
 
+const slimTimes = (t: StopTimeUpdate['arrival']) =>
+  t ? { delay: t.delay, time: t.time } : undefined;
+const slimStop = (u: StopTimeUpdate): StopTimeUpdate => ({
+  stopId: u.stopId,
+  arrival: slimTimes(u.arrival),
+  departure: slimTimes(u.departure),
+});
+
 // Keep only what the app reads: the raw trip_updates feed covers all of Spain (~190 KB).
 const slimTrips = (f: TripUpdates): TripUpdates => ({
   entity: (f.entity ?? []).map(e => ({
@@ -111,6 +122,7 @@ const slimTrips = (f: TripUpdates): TripUpdates => ({
         scheduleRelationship: e.tripUpdate?.trip?.scheduleRelationship,
       },
       delay: e.tripUpdate?.delay,
+      stopTimeUpdate: e.tripUpdate?.stopTimeUpdate?.map(slimStop),
     },
   })),
 });
@@ -121,14 +133,14 @@ export const isOffline = (err: unknown) => err instanceof TypeError;
 type Feed<T> = { data: T; offlineSince: Date | null; fetchedAt: number };
 
 // Online: fetch and remember. No network: the last stored copy (offlineSince = when it was fetched).
-async function fetchFeed<T>(
+async function fetchFeed<T, R = T>(
   name: string,
   query: string,
-  slim: (raw: T) => T,
+  slim: (raw: R) => T,
 ): Promise<Feed<T>> {
   const key = `madrid-transit:cache:rt:${name}`;
   try {
-    const live = await getLive<T>(`${base}rt.php?${query}`);
+    const live = await getLive<R>(`${base}rt.php?${query}`);
     const data = slim(live.data);
     saveJson(key, { at: Date.now(), data });
     return { data, offlineSince: null, fetchedAt: live.fetchedAt };
@@ -144,6 +156,44 @@ export const fetchTripUpdates = () =>
   fetchFeed<TripUpdates>('trip_updates', 'f=trip_updates', slimTrips);
 export const fetchTripUpdatesLd = () =>
   fetchFeed<TripUpdates>('trip_updates_LD', 'f=trip_updates_LD', slimTrips);
+// Train positions (follow view only), cut down to trip, stop, status and time.
+type RawPositions = {
+  entity?: {
+    vehicle?: {
+      trip?: { tripId?: string };
+      stopId?: string;
+      currentStatus?: VehicleStatus;
+      timestamp?: string | number;
+    };
+  }[];
+};
+const slimPositions = (f: RawPositions): VehiclePositions => ({
+  entity: (f.entity ?? []).map(e => ({
+    vehicle: {
+      tripId: e.vehicle?.trip?.tripId,
+      stopId: e.vehicle?.stopId,
+      status: e.vehicle?.currentStatus,
+      timestamp: e.vehicle?.timestamp,
+    },
+  })),
+});
+
+const POSITIONS_MEMO_MS = 15_000;
+const positionsMemo = new Map<boolean, { at: number; p: Promise<Feed<VehiclePositions>> }>();
+export const fetchPositions = (ld: boolean) => {
+  const hit = positionsMemo.get(ld);
+  if (hit && Date.now() - hit.at < POSITIONS_MEMO_MS) return hit.p;
+  const name = ld ? 'vehicle_positions_LD' : 'vehicle_positions';
+  const p = fetchFeed<VehiclePositions, RawPositions>(name, `f=${name}`, slimPositions);
+  positionsMemo.set(ld, { at: Date.now(), p });
+  // Failures and offline copies are not memoised: the next refresh retries.
+  p.then(
+    f => f.offlineSince && positionsMemo.delete(ld),
+    () => positionsMemo.delete(ld),
+  );
+  return p;
+};
+
 export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f => f);
 
 // CRTM stop times for a bus or light-rail stop (`par_8_16578` -> `8_16578`). rt.php caches for

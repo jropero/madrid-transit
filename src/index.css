@@ -433,6 +433,56 @@ p.next {
   margin-top: 12px;
 }
 
+.next .late {
+  color: var(--late);
+}
+
+.next li.passed {
+  opacity: 0.5;
+}
+
+.next li.here,
+.next li.here span {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.next li.pos {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.next li.fold .stop-link {
+  text-decoration: underline;
+}
+
+/* Which departure of a group to follow: sits under the tile, next to the stop list. */
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0 84px;
+}
+
+.pick {
+  padding: 4px 10px;
+  border: 1px solid var(--muted);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.pick[aria-pressed='true'] {
+  border-color: var(--fg);
+  color: var(--fg);
+}
+
+.pick.cancelled {
+  text-decoration: line-through;
+}
+
 /* Metro tile: big content, small lowercase label bottom-left. Colour = mode. */
 .tile {
   flex: 0 0 72px;
@@ -468,6 +518,7 @@ p.next {
   left: 6px;
   bottom: 4px;
   font-size: var(--t-tiny);
+  line-height: 1.2;
   font-weight: 600;
   text-transform: lowercase;
   opacity: 0.9;
@@ -777,6 +828,11 @@ p.next {
   font-weight: 600;
   color: var(--muted);
   text-transform: lowercase;
+}
+
+/* Departures section title: space above like between line groups, clear gap below. */
+.section-sub {
+  margin: 24px 0 12px;
 }
 
 .warn-mark {
