@@ -30,12 +30,24 @@ export function useStopNav(initial: Saved) {
     navRef.current = nav;
   }, [nav]);
 
-  // Fresh load: a guard entry at the bottom, the app entry above it (so the first back after a
-  // jump lands on the stop). A reload keeps the restored entries.
+  // Chrome's history-manipulation intervention makes back skip entries that were added without
+  // user activation, so a guard + app entry pushed on load would be skipped and back would close
+  // the installed app. The guard is therefore armed on the first user activation (the current
+  // entry becomes the guard, the app entry goes above it), and again after each toast. A reload
+  // keeps the restored entries.
+  const armed = useRef(!!navOf(history.state));
   useEffect(() => {
-    if (navOf(history.state) || onPivotEntry()) return;
-    history.replaceState({ guard: true }, '');
-    history.pushState(entry(navRef.current), '');
+    const arm = () => {
+      if (armed.current || onPivotEntry()) return;
+      armed.current = true;
+      if (!onGuardEntry()) history.replaceState({ guard: true }, '');
+      history.pushState(entry(navRef.current), '');
+    };
+    const events = ['pointerdown', 'touchstart', 'keydown'];
+    for (const e of events) window.addEventListener(e, arm, { passive: true });
+    return () => {
+      for (const e of events) window.removeEventListener(e, arm);
+    };
   }, []);
 
   useEffect(() => {
@@ -44,7 +56,7 @@ export function useStopNav(initial: Saved) {
       const n = navOf(history.state);
       if (n) setNav(n);
     };
-    // Back reached the guard: the first time warn and stay, a second one within 2 s leaves.
+    // Back reached the guard: the first time warn and stay on it, a second one within 2 s leaves.
     const exitGuard = () => {
       if (toastTimer.current) {
         clearTimeout(toastTimer.current);
@@ -53,7 +65,8 @@ export function useStopNav(initial: Saved) {
         history.back();
         return;
       }
-      history.pushState(entry(navRef.current), '');
+      // Stay on the guard entry (a push here has no user activation); the next tap re-arms.
+      armed.current = false;
       setToast(true);
       toastTimer.current = window.setTimeout(() => {
         toastTimer.current = 0;

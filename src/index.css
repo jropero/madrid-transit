@@ -163,6 +163,23 @@ button {
   vertical-align: -0.2em;
 }
 
+/* Icon beside text: centred on the x-height of the line; the svg sits on the baseline of its
+   own zero-height box. Wrap the icon in one of these. */
+.acc,
+.info-btn,
+.warn-mark {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.acc .icon,
+.info-btn .icon,
+.warn-mark .icon {
+  vertical-align: baseline;
+}
+
 .title {
   font-size: var(--t-title);
   font-weight: 300;
@@ -531,16 +548,8 @@ p.next {
 }
 
 .acc {
-  display: inline-flex;
-  align-items: center;
   margin-left: 4px;
-  line-height: 0;
   color: var(--muted);
-  vertical-align: middle;
-}
-
-.acc .icon {
-  vertical-align: baseline;
 }
 
 .trail {
@@ -554,6 +563,10 @@ p.next {
   text-transform: lowercase;
   white-space: nowrap;
   color: var(--muted);
+}
+
+.trail span[aria-hidden='true'] {
+  margin-left: 6px;
 }
 
 .trail span[aria-current='true'] {
@@ -664,7 +677,7 @@ p.next {
 .alert-row {
   display: flex;
   gap: 6px;
-  align-items: baseline;
+  align-items: center;
   width: 100%;
   min-width: 0;
   text-align: left;
@@ -728,8 +741,13 @@ p.next {
 }
 
 .warn-mark {
-  color: var(--late);
   margin-left: 8px;
+  color: var(--late);
+}
+
+.alert-bar .icon {
+  width: 0.9em;
+  height: 0.9em;
 }
 
 .tag {
@@ -785,19 +803,9 @@ p.next {
 
 /* Stop info button (inside the title), panel, line list and terminus text */
 .info-btn {
-  display: inline-flex;
-  align-items: center;
   margin-left: 8px;
   padding: 0;
-  line-height: 0;
   color: var(--muted);
-
-  /* centre on the first line's x-height; stays on its line when the title wraps */
-  vertical-align: middle;
-}
-
-.info-btn .icon {
-  vertical-align: baseline;
 }
 
 .info-btn[aria-expanded='true'] {
