@@ -112,7 +112,7 @@ export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f =>
 // CRTM stop times for a bus or light-rail stop (`par_8_16578` -> `8_16578`). rt.php caches for
 // 60 s; the client memo does too, so re-renders and quick manual refreshes never refetch. The
 // last copy per stop is kept for offline (evictable cache entries).
-const CRTM_MEMO_MS = 60_000;
+const CRTM_MEMO_MS = 30_000;
 const crtmMemo = new Map<string, { at: number; p: Promise<Feed<CrtmJson>> }>();
 export const fetchCrtm = (stopId: string) => {
   const code = stopId.replace(/^par_/, '');

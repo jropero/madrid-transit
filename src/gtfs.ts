@@ -454,8 +454,46 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
   return rows.sort((a, b) => a.when.getTime() - b.when.getTime());
 }
 
-// Merge rule: a line present in the CRTM rows uses the CRTM times; lines absent from it keep
-// their timetable departures. CRTM rows are limited to the usual 2 h window.
+const CRTM_GAP_MS = 20 * 60_000;
+
+const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
+  tripId: `crtm-${r.issue}-${r.routeId}-${i}`,
+  routeId: r.routeId,
+  line: routes[r.routeId]?.line ?? r.line,
+  color: routes[r.routeId]?.color ?? '#555555',
+  text: routes[r.routeId]?.text ?? '#ffffff',
+  dest: r.dest,
+  bus: true,
+  tram: r.tram,
+  urban: routes[r.routeId]?.urban,
+  metro: r.metro,
+  planned: r.when,
+  expected: r.when,
+  cancelled: false,
+  live: true,
+});
+
+// First and last CRTM time per line, for the rows inside the window only.
+function crtmSpans(rows: CrtmRow[]): Map<string, { first: number; last: number }> {
+  const spans = new Map<string, { first: number; last: number }>();
+  for (const r of rows) {
+    const t = r.when.getTime();
+    const s = spans.get(r.routeId);
+    if (!s) spans.set(r.routeId, { first: t, last: t });
+    else spans.set(r.routeId, { first: Math.min(s.first, t), last: Math.max(s.last, t) });
+  }
+  return spans;
+}
+
+// A timetable departure of a covered line survives after CRTM's last time, or when it sits
+// more than 20 min before CRTM's first time (a gap in the CRTM answer).
+const keepsPlanned = (t: number, s: { first: number; last: number }) =>
+  t > s.last || t < s.first - CRTM_GAP_MS;
+
+// Merge rule: a line is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
+// covered line uses those CRTM rows plus its timetable departures after CRTM's last time (and
+// those over 20 min before its first); uncovered lines (including lines CRTM lists only far
+// in the future) keep their whole timetable.
 export function mergeCrtm(
   planned: Departure[],
   rows: CrtmRow[] | null,
@@ -463,28 +501,16 @@ export function mergeCrtm(
   now: Date,
 ): Departure[] {
   if (!rows?.length) return planned;
-  const lines = new Set(rows.map(r => r.routeId));
-  const live = rows
-    .filter(r => r.when.getTime() <= now.getTime() + HORIZON_MS)
-    .map((r, i): Departure => ({
-      tripId: `crtm-${r.issue}-${r.routeId}-${i}`,
-      routeId: r.routeId,
-      line: routes[r.routeId]?.line ?? r.line,
-      color: routes[r.routeId]?.color ?? '#555555',
-      text: routes[r.routeId]?.text ?? '#ffffff',
-      dest: r.dest,
-      bus: true,
-      tram: r.tram,
-      urban: routes[r.routeId]?.urban,
-      metro: r.metro,
-      planned: r.when,
-      expected: r.when,
-      cancelled: false,
-      live: true,
-    }));
-  return [...planned.filter(d => !lines.has(d.routeId)), ...live].sort(
-    (a, b) => a.expected.getTime() - b.expected.getTime(),
-  );
+  const from = now.getTime() - 60_000;
+  const to = now.getTime() + HORIZON_MS;
+  const inWindow = rows.filter(r => r.when.getTime() >= from && r.when.getTime() <= to);
+  const spans = crtmSpans(inWindow);
+  const kept = planned.filter(d => {
+    const s = spans.get(d.routeId);
+    return !s || keepsPlanned(d.expected.getTime(), s);
+  });
+  const live = inWindow.map((r, i) => crtmDeparture(r, i, routes));
+  return [...kept, ...live].sort((a, b) => a.expected.getTime() - b.expected.getTime());
 }
 console.assert(
   (() => {
@@ -551,7 +577,7 @@ console.assert(
       issue: '1',
     };
     const out = mergeCrtm(
-      [dep('A', '2026-11-25T09:10:00Z'), dep('B', '2026-11-25T09:20:00Z')],
+      [dep('A', '2026-11-25T09:05:00Z'), dep('B', '2026-11-25T09:20:00Z')],
       [row],
       {},
       now,
@@ -563,10 +589,58 @@ console.assert(
       out[0].live &&
       out[1].routeId === 'B' &&
       !out[1].live &&
-      mergeCrtm([dep('B', '2026-11-25T09:20:00Z')], [], {}, now).length === 1
+      mergeCrtm([dep('B', '2026-11-25T09:20:00Z')], [], {}, now).length === 1 &&
+      mergeCrtm([dep('B', '2026-11-25T09:20:00Z')], null, {}, now).length === 1
     );
   })(),
-  'mergeCrtm: CRTM lines replace the timetable, other lines keep it',
+  'mergeCrtm: CRTM lines replace the timetable, other lines keep it, empty/null rows',
+);
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T09:00:00Z');
+    const dep = (iso: string): Departure => ({
+      tripId: iso,
+      routeId: 'A',
+      line: 'A',
+      color: '#000',
+      text: '#fff',
+      dest: 'H',
+      bus: true,
+      planned: new Date(iso),
+      expected: new Date(iso),
+      cancelled: false,
+      live: false,
+    });
+    const row = (iso: string): CrtmRow => ({
+      when: new Date(iso),
+      routeId: 'A',
+      line: 'A',
+      dest: 'X',
+      tram: false,
+      metro: false,
+      issue: '1',
+    });
+    const plan = ['09:10', '09:40', '10:10', '10:40'].map(h => dep(`2026-11-25T${h}:00Z`));
+    // 07827 case: one far-future CRTM row leaves the whole timetable in place.
+    const far = mergeCrtm(plan, [row('2026-11-25T22:34:00Z')], {}, now);
+    // Normal case: CRTM 09:12 and 09:42 replace 09:10 and 09:40; 10:10 and 10:40 are kept.
+    const near = mergeCrtm(
+      plan,
+      [row('2026-11-25T09:12:00Z'), row('2026-11-25T09:42:00Z')],
+      {},
+      now,
+    );
+    return (
+      far.length === 4 &&
+      far.every(d => !d.live) &&
+      near.length === 4 &&
+      near.filter(d => d.live).length === 2 &&
+      near[0].expected.toISOString() === '2026-11-25T09:12:00.000Z' &&
+      near[2].expected.toISOString() === '2026-11-25T10:10:00.000Z' &&
+      !near[2].live
+    );
+  })(),
+  'mergeCrtm: far-future-only CRTM row keeps the timetable; near rows replace, later ones kept',
 );
 
 // EMT MobilityLabs arrivals (via rt.php): code "00", rows at data[0].Arrive. estimateArrive is

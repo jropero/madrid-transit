@@ -2,7 +2,7 @@
 // Purely visual (the status line covers screen readers); `key={at}` restarts the CSS animation on every load.
 export const REFRESH_MS = 30_000;
 
-export const CRTM_REFRESH_MS = 60_000;
+export const CRTM_REFRESH_MS = 30_000;
 
 export default function RefreshBar({
   at,
