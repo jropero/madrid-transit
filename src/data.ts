@@ -148,3 +148,10 @@ export const fetchEmt = (stopId: string) => {
   );
   return p;
 };
+
+// stopId -> routeIds serving it (all feeds), for the stop info panel; loaded on first use.
+const stopLinesMemo = new Map<string, Promise<Record<string, string[]>>>();
+export const loadStopLines = () =>
+  memo(stopLinesMemo, 'all', () =>
+    getJson<Record<string, string[]>>(`${base}data/stop-lines.json`),
+  );

@@ -3,6 +3,7 @@ import AppBar from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
+import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
 import Alerts, { AccessMark, AlertMark, useAlertBoard } from './Alerts.tsx';
 import {
   fetchAlerts,
@@ -563,6 +564,8 @@ function stopCodeLabel(info: Stop | undefined, id: string): string {
   return info?.k === 'r' && /^\d+$/.test(id) ? `estación ${id}` : '';
 }
 
+const INFO_PANEL = 'stop-info';
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -612,6 +615,7 @@ function Departures({
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
   const info = useStopInfo(selected.id, stopById, !!tt);
+  const [infoOpen, toggleInfo] = useInfoToggle(selected.id);
   const wa = info?.wa ?? false;
   const subtitle = [info?.town, stopCodeLabel(info, selected.id)].filter(Boolean).join(' · ');
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
@@ -681,8 +685,19 @@ function Departures({
       <StopsRow stops={stops} selected={selected} onSelect={onSelect} />
       <h2 className="title">
         {short(selected.name)} <AccessMark on={wa} />
+        <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
       </h2>
       {subtitle && <small className="sub">{subtitle}</small>}
+      {infoOpen && tt && (
+        <StopInfo
+          id={INFO_PANEL}
+          stop={info}
+          routes={tt.routes}
+          deps={deps}
+          now={now}
+          onSelect={onSelect}
+        />
+      )}
 
       {showSearch && (
         <SearchPanel
@@ -715,7 +730,14 @@ function Departures({
           now={now}
         />
       ))}
-      {empty && <p className="status">sin salidas en las próximas 2 horas</p>}
+      {empty && (
+        <NoDepartures
+          stopId={selected.id}
+          routes={tt.routes}
+          now={now}
+          fallback="sin salidas en las próximas 2 horas"
+        />
+      )}
 
       <p className="status">
         {statusLine([error, depsError, rt.status, expiryNote(tt, new Date(now), !renfeStop)])}

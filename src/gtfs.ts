@@ -23,7 +23,11 @@ export type RouteInfo = {
   tram?: boolean;
   metro?: boolean;
   urban?: boolean; // town bus (CRTM "Autobuses Urbanos")
+  svc?: Partial<Record<DayType, Svc>>; // EMT: service summary per day type
 };
+// [first HH:MM, last HH:MM, min headway (min), max headway (min)]
+export type Svc = [string, string, number, number];
+export type DayType = 'lab' | 'sab' | 'fes';
 export type RouteMap = Record<string, RouteInfo>;
 // updated: date of Renfe's zip (HTTP Last-Modified, else download date), yyyymmdd.
 export type DaysFile = {
@@ -1463,4 +1467,143 @@ console.assert(
     );
   })(),
   'nextStops offsets, pickPattern: destination match, longest fallback, none',
+);
+
+// ---------------------------------------------------------------- Stop info and terminus text
+
+// Today's day type in Madrid: Sunday = fes, Saturday = sab, else lab (holidays are not known).
+export function dayType(now: Date): DayType {
+  const wd = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: MADRID }).format(
+    now,
+  );
+  if (wd === 'Sun') return 'fes';
+  return wd === 'Sat' ? 'sab' : 'lab';
+}
+console.assert(
+  dayType(new Date('2026-11-25T12:00:00Z')) === 'lab' &&
+    dayType(new Date('2026-11-28T12:00:00Z')) === 'sab' &&
+    dayType(new Date('2026-11-29T12:00:00Z')) === 'fes' &&
+    dayType(new Date('2026-11-28T23:30:00Z')) === 'fes',
+  'dayType: Madrid weekday, not UTC',
+);
+
+// "cada 11–23 min (07:00–23:59)", or "cada 12 min (…)" when both ends agree; '' when unknown.
+export function svcText(svc: Svc | undefined): string {
+  if (!svc) return '';
+  const [from, to, lo, hi] = svc;
+  return `cada ${lo === hi ? lo : `${lo}–${hi}`} min (${from}–${to})`;
+}
+console.assert(
+  svcText(['07:00', '23:59', 11, 23]) === 'cada 11–23 min (07:00–23:59)' &&
+    svcText(['07:00', '23:59', 12, 12]) === 'cada 12 min (07:00–23:59)' &&
+    svcText(undefined) === '',
+  'svcText',
+);
+
+export type End = 'cabecera' | 'final' | null;
+// Role of a stop in a route's patterns: first stop of any pattern = cabecera, only ever last =
+// final, else (or absent) null.
+export function classifyEnd(patterns: Pattern[], stopId: string): End {
+  const here = patterns.filter(p => stopIndex(p, stopId) >= 0);
+  if (here.some(p => p[0][0] === stopId)) return 'cabecera';
+  return here.length > 0 && here.every(p => p.at(-1)?.[0] === stopId) ? 'final' : null;
+}
+
+// Distinct last-stop ids of the patterns that still continue after `stopId`.
+export function destinationsAfter(patterns: Pattern[], stopId: string): string[] {
+  const ids = patterns.filter(p => stopsAfter(p, stopId) > 0).map(p => p.at(-1)?.[0] ?? '');
+  return [...new Set(ids.filter(Boolean))];
+}
+console.assert(
+  (() => {
+    const out: Pattern[] = [
+      [
+        ['t', 0],
+        ['m', 60],
+        ['z', 120],
+      ],
+      [
+        ['z', 0],
+        ['m', 60],
+        ['t', 120],
+      ],
+    ];
+    const through: Pattern[] = [
+      [
+        ['a', 0],
+        ['m', 60],
+        ['b', 120],
+      ],
+    ];
+    return (
+      classifyEnd(out, 't') === 'cabecera' &&
+      classifyEnd([out[1]], 't') === 'final' &&
+      classifyEnd(through, 'm') === null &&
+      classifyEnd(through, 'zz') === null &&
+      destinationsAfter(out, 'm').join() === 'z,t' &&
+      destinationsAfter(out, 't').join() === 'z' &&
+      destinationsAfter([out[1]], 't').length === 0
+    );
+  })(),
+  'classifyEnd: cabecera / final / through, destinationsAfter',
+);
+
+export const NEARBY_M = 150;
+// Other stops (different id) within `radius` metres, nearest first.
+export const nearbyStops = (all: Stop[], here: Stop, radius = NEARBY_M): NearStop[] =>
+  all
+    .filter(s => s.id !== here.id)
+    .map(s => ({ ...s, dist: metres(here, s) }))
+    .filter(s => s.dist <= radius)
+    .sort((a, b) => a.dist - b.dist);
+
+// Stop type for the info panel.
+export function stopKind(s: Stop): string {
+  if (s.k === 'r') return 'Cercanías';
+  if (s.k === 'm') return 'Metro';
+  if (s.k === 't') return 'tranvía';
+  if (s.k === 'e') return 'EMT';
+  return s.u ? 'urbano' : 'interurbano';
+}
+
+// Where a line's data comes from.
+export function sourceOf(routeId: string, r: RouteInfo | undefined): string {
+  if (routeId.startsWith('emt_')) return 'EMT MobilityLabs (en vivo)';
+  if (r?.metro) return 'CRTM (en vivo)';
+  if (r?.tram) return 'CRTM (en vivo) y horario';
+  if (!r || routeId.startsWith('10T')) return 'Renfe GTFS-RT (en vivo) y horario';
+  return 'CRTM (en vivo) y horario';
+}
+
+// Typical headway in minutes per route from upcoming departures: the median gap between
+// consecutive departures of one destination (>= 2 needed), pooled over destinations.
+export function typicalGaps(deps: Departure[]): Map<string, number> {
+  const byDest = new Map<string, Departure[]>();
+  for (const d of deps) {
+    const k = `${d.routeId}|${d.dest}`;
+    byDest.set(k, [...(byDest.get(k) ?? []), d]);
+  }
+  const gaps = new Map<string, number[]>();
+  for (const list of byDest.values()) {
+    const t = list.map(d => d.expected.getTime()).sort((a, b) => a - b);
+    const g = gaps.get(list[0].routeId) ?? [];
+    t.slice(1).forEach((x, i) => g.push((x - t[i]) / 60_000));
+    gaps.set(list[0].routeId, g);
+  }
+  const out = new Map<string, number>();
+  for (const [id, g] of gaps) {
+    if (!g.length) continue;
+    g.sort((a, b) => a - b);
+    out.set(id, Math.max(1, Math.round(g[Math.floor((g.length - 1) / 2)])));
+  }
+  return out;
+}
+console.assert(
+  (() => {
+    const at = (m: number, dest: string) =>
+      ({ routeId: 'r', dest, expected: new Date(m * 60_000) }) as Departure;
+    const g = typicalGaps([at(0, 'a'), at(10, 'a'), at(21, 'a'), at(5, 'b'), at(99, 'c')]);
+    return g.get('r') === 10 && typicalGaps([at(0, 'a')]).size === 0;
+  })(),
+  'typicalGaps: median gap per destination, single departures ignored',
 );

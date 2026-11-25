@@ -819,6 +819,86 @@ async function emtStops(zip) {
   return stops;
 }
 
+// calendar.txt service id -> day type: Sunday/holiday services `fes`, Saturday-only `sab`, the
+// rest (Mon-Thu, Fri, Mon-Fri) `lab`.
+function dayTypeOf(c) {
+  if (c.sunday === '1') return 'fes';
+  const weekday = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'].some(
+    d => c[d] === '1',
+  );
+  return c.saturday === '1' && !weekday ? 'sab' : 'lab';
+}
+async function emtDayTypes(zip) {
+  const types = new Map();
+  for await (const c of rows(zip, 'calendar.txt')) {
+    types.set(c.service_id, dayTypeOf(c));
+  }
+  return types;
+}
+
+const hhmmOf = secs => {
+  const m = Math.floor(secs / 60) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+};
+
+// Frequency entries [dayType, startSecs, endSecs, headwaySecs] -> per day type
+// [firstHHMM, lastHHMM, minHeadwayMin, maxHeadwayMin].
+function summariseFreq(entries) {
+  const out = {};
+  for (const [day, start, end, headway] of entries) {
+    const min = Math.max(1, Math.round(headway / 60));
+    const [a, b, lo, hi] = out[day] ?? [start, end, min, min];
+    out[day] = [Math.min(a, start), Math.max(b, end), Math.min(lo, min), Math.max(hi, min)];
+  }
+  return Object.fromEntries(
+    Object.entries(out).map(([d, [a, b, lo, hi]]) => [d, [hhmmOf(a), hhmmOf(b), lo, hi]]),
+  );
+}
+console.assert(
+  (() => {
+    const s = summariseFreq([
+      ['lab', 25200, 28799, 1380],
+      ['lab', 28800, 86399, 660],
+      ['lab', 25200, 86399, 900],
+      ['fes', 32400, 79199, 1200],
+    ]);
+    return (
+      JSON.stringify(s.lab) === '["07:00","23:59",11,23]' &&
+      JSON.stringify(s.fes) === '["09:00","21:59",20,20]' &&
+      !s.sab
+    );
+  })(),
+  'summariseFreq: first/last, min/max headway, per day type',
+);
+
+// Adds `svc` (per day type summary) to the EMT routes from frequencies.txt (streamed).
+async function emtTrips(zip, keys) {
+  const days = await emtDayTypes(zip);
+  const trips = new Map();
+  for await (const t of rows(zip, 'trips.txt')) {
+    const key = keys.get(t.route_id);
+    const day = days.get(t.service_id);
+    if (key && day) trips.set(t.trip_id, [key, day]);
+  }
+  return trips;
+}
+
+async function emtService(zip, routes, keys) {
+  const trips = await emtTrips(zip, keys);
+  const byRoute = new Map();
+  for await (const f of rows(zip, 'frequencies.txt')) {
+    const [key, day] = trips.get(f.trip_id) ?? [];
+    const headway = Number(f.headway_secs);
+    if (!key || !(headway > 0)) continue;
+    byRoute.set(key, [
+      ...(byRoute.get(key) ?? []),
+      [day, toSecs(f.start_time), toSecs(f.end_time), headway],
+    ]);
+  }
+  for (const [key, list] of byRoute) routes[key].svc = summariseFreq(list);
+  return byRoute.size;
+}
+
 // Never fails the build: a missing or broken EMT feed only drops EMT stops.
 async function buildEmt() {
   try {
@@ -827,13 +907,17 @@ async function buildEmt() {
     const { routes, keys } = await emtRoutes(zip);
     const stops = await emtStops(zip);
     if (!stops.length) throw new Error('no stops');
+    const withSvc = await emtService(zip, routes, keys).catch(err => {
+      console.warn(`EMT frequencies skipped (${err.message})`);
+      return 0;
+    });
     const ofTrip = await tripRoutes(zip, id => keys.get(id));
     const pats = await streamPatterns(
       zip,
       id => ofTrip.get(id),
       id => (/^\d{1,6}$/.test(id) ? `emt_${id}` : null),
     );
-    return { routes, stops, pats };
+    return { routes, stops, pats, withSvc };
   } catch (err) {
     console.warn(`EMT step failed (${err.message}): skipping`);
     return null;
@@ -1005,6 +1089,47 @@ async function writeRouteFiles(feeds) {
   return n;
 }
 
+// stop-lines.json = { stopId: [routeId, ...] } over every feed's patterns (the stop info panel
+// reads it instead of scanning hundreds of route files).
+function stopLines(feeds) {
+  const map = new Map();
+  const routes = feeds.filter(Boolean).flatMap(f => [...f.pats.routes]);
+  for (const [routeId, { list }] of routes.filter(([id]) => /^[\w.-]{1,40}$/.test(id))) {
+    for (const stopId of new Set(list.flat(2).filter(x => typeof x === 'string'))) {
+      map.set(stopId, (map.get(stopId) ?? new Set()).add(routeId));
+    }
+  }
+  return Object.fromEntries(
+    [...map].map(([id, set]) => [id, [...set].sort((a, b) => a.localeCompare(b))]),
+  );
+}
+console.assert(
+  (() => {
+    const pats = {
+      routes: new Map([
+        [
+          'r1',
+          {
+            list: [
+              [
+                ['a', 0],
+                ['b', 60],
+              ],
+              [
+                ['b', 0],
+                ['c', 9],
+              ],
+            ],
+          },
+        ],
+      ]),
+    };
+    const m = stopLines([{ pats }, null]);
+    return m.a.join() === 'r1' && m.b.join() === 'r1' && m.c.length === 1;
+  })(),
+  'stopLines maps stops to the routes whose patterns contain them',
+);
+
 // public/rt-stops.php: the stops rt.php may fetch live (keyed arrays for O(1) isset). EMT stop
 // numbers; CRTM codes `8_`/`10_`/`4_` from the stop ids (Metro: kept ids after the merge) and
 // `6_<emt number>` (fallback). Every key must match rt.php's regexes. Generated, not committed.
@@ -1072,12 +1197,13 @@ function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly) {
   );
   console.log(
     emt
-      ? `EMT: routes ${Object.keys(emt.routes).length}, stops ${emt.stops.length}`
+      ? `EMT: routes ${Object.keys(emt.routes).length} (${emt.withSvc} with svc), stops ${emt.stops.length}`
       : 'EMT: skipped',
   );
   console.log(
     `stops.json ${kb(sz.stops.raw)} raw, ${kb(sz.stops.gz)} gzip (${stops.length} stops)`,
   );
+  console.log(`stop-lines.json ${kb(sz.lines.raw)} raw, ${kb(sz.lines.gz)} gzip`);
   const rf = readdirSync(`${OUT}route`).map(f => [f, statSync(`${OUT}route/${f}`).size]);
   const [rBig, rBigSize] = rf.reduce((a, b) => (b[1] > a[1] ? b : a));
   console.log(
@@ -1125,6 +1251,7 @@ async function main() {
   await writeJson('days.json', renfe.days);
   await writeStopFiles(stops, renfe, [bus, urb, ml].filter(Boolean));
   await writeRouteFiles([renfe, bus, urb, ml, metro, emt]);
+  sz.lines = await writeJson('stop-lines.json', stopLines([renfe, bus, urb, ml, metro, emt]));
   await writeAllowList(stops);
   report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly);
 }
