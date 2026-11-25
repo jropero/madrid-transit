@@ -142,6 +142,8 @@ async function fetchFeed<T>(
 
 export const fetchTripUpdates = () =>
   fetchFeed<TripUpdates>('trip_updates', 'f=trip_updates', slimTrips);
+export const fetchTripUpdatesLd = () =>
+  fetchFeed<TripUpdates>('trip_updates_LD', 'f=trip_updates_LD', slimTrips);
 export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f => f);
 
 // CRTM stop times for a bus or light-rail stop (`par_8_16578` -> `8_16578`). rt.php caches for

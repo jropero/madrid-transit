@@ -23,6 +23,7 @@ export type RouteInfo = {
   tram?: boolean;
   metro?: boolean;
   urban?: boolean; // town bus (CRTM "Autobuses Urbanos")
+  ld?: boolean; // Renfe media/larga distancia (AVE, AVLO, AVANT, Euromed, IC, MD)
   svc?: Partial<Record<DayType, Svc>>; // EMT: service summary per day type
 };
 // [first HH:MM, last HH:MM, min headway (min), max headway (min)]
@@ -39,10 +40,14 @@ export type DaysFile = {
 // Per-stop timetable file: route ids (r), destination stop ids (d) and, per service id, rows of
 // [secs since service-day midnight (may exceed 24h), trip id minus the service-id prefix, r index, d index,
 // pattern index into the route's route/<routeId>.json].
+// ld: media/larga distancia rows `[secs, calendar index, r index, d index, pattern index, full trip id]`
+// sorted by secs, with their own calendars (same shape as buses).
+export type LdRow = [number, number, number, number, number, string];
 export type RenfeFile = {
   r: string[];
   d: string[];
   s: Record<string, [number, string, number, number, number?][]>;
+  ld?: { c: BusCalendar[]; x: LdRow[] };
 };
 // Bus stop file (timetable only): route ids (r), headsigns (h), calendars (c: weekday bitmask with
 // bit 0 = Sunday, start and end yyyymmdd, added and removed yyyymmdd dates) and rows
@@ -71,6 +76,8 @@ export type Departure = {
   urban?: boolean; // town bus
   emt?: boolean; // EMT city bus (live arrivals only)
   metro?: boolean; // Metro de Madrid (live arrivals only)
+  ld?: boolean; // Renfe media/larga distancia
+  mode?: string; // tile caption (media/larga distancia: lowercase product name)
   planned: Date;
   expected: Date;
   cancelled: boolean;
@@ -228,19 +235,92 @@ function dayDepartures(
   return out;
 }
 
+// Window of seconds since a service day's midnight worth looking at (an hour of slack for DST days).
+function secsWindow(day: string, now: Date) {
+  const midnight = madridTime(day, 0).getTime();
+  return {
+    from: (now.getTime() - 15 * 60_000 - midnight) / 1000 - 3600,
+    to: (now.getTime() + HORIZON_MS - midnight) / 1000 + 3600,
+  };
+}
+
+// One service day's media/larga distancia rows -> departures inside the window.
+export function ldDay(
+  ld: NonNullable<RenfeFile['ld']>,
+  file: RenfeFile,
+  day: string,
+  routes: RouteMap,
+  now: Date,
+): Departure[] {
+  const { from, to } = secsWindow(day, now);
+  const active = ld.c.map(c => busActive(c, day));
+  const out: Departure[] = [];
+  for (const [secs, ci, ri, di, pi, id] of ld.x) {
+    const routeId = file.r[ri];
+    const r = routes[routeId];
+    if (secs < from || secs > to || !active[ci] || !r) continue;
+    const planned = madridTime(day, secs);
+    if (!inWindow(planned.getTime(), now)) continue;
+    out.push({
+      tripId: id,
+      routeId,
+      line: r.line,
+      color: r.color,
+      text: r.text,
+      dest: file.d[di],
+      ld: true,
+      mode: r.name?.toLowerCase(),
+      pi,
+      planned,
+      expected: planned,
+      cancelled: false,
+      live: false,
+    });
+  }
+  return out;
+}
+console.assert(
+  (() => {
+    const routes: RouteMap = { L: { line: 'AVE', color: '#000', text: '#fff', ld: true } };
+    const file: RenfeFile = { r: ['L'], d: ['9'], s: {} };
+    const wk = 0b0111110;
+    const ld = {
+      c: [
+        [wk, 20260101, 20261231, [], [20261125]],
+        [wk, 20260101, 20261231, [], []],
+      ] as BusCalendar[],
+      x: [
+        [36000, 0, 0, 0, 0, 'A'],
+        [36000, 1, 0, 0, 0, 'B'],
+      ] as LdRow[],
+    };
+    // 2026-11-25 is a Wednesday: calendar 0 removes it, calendar 1 runs; 10:00 Madrid = 09:00Z.
+    const now = new Date('2026-11-25T08:30:00Z');
+    const out = ldDay(ld, file, '20261125', routes, now);
+    return (
+      out.length === 1 && out[0].tripId === 'B' && out[0].ld === true && out[0].dest === '9'
+    );
+  })(),
+  'ldDay calendars and removed dates',
+);
+
 // Renfe: scheduled departures within [now - 15 min, now + 2 h], from today's and yesterday's service days
-// (yesterday's trips run past midnight with secs >= 24h).
+// (yesterday's trips run past midnight with secs >= 24h), plus media/larga distancia from the stop's
+// own calendars when `ld` is on.
 function renfeScheduled(
   file: RenfeFile,
   days: DaysFile,
   routes: RouteMap,
   now: Date,
+  withLd = true,
 ): Departure[] {
   const today = madridDate(now);
+  const ld = withLd ? file.ld : undefined;
   return [shiftDay(today, -1), today]
-    .flatMap(day =>
-      (days.days[day] ?? []).flatMap(sid => dayDepartures(file, day, routes, now, sid)),
-    )
+    .flatMap(day => [
+      ...(days.days[day] ?? []).flatMap(sid => dayDepartures(file, day, routes, now, sid)),
+      ...(ld ? ldDay(ld, file, day, routes, now) : []),
+    ])
     .sort((a, b) => a.planned.getTime() - b.planned.getTime());
 }
 
@@ -257,9 +337,7 @@ export function busActive(c: BusCalendar, day: string): boolean {
 // One service day's bus rows -> departures inside the window. Rows are prefiltered on seconds
 // (with an hour of slack for DST days) so only a few reach the slower madridTime.
 function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Departure[] {
-  const midnight = madridTime(day, 0).getTime();
-  const from = (now.getTime() - 15 * 60_000 - midnight) / 1000 - 3600;
-  const to = (now.getTime() + HORIZON_MS - midnight) / 1000 + 3600;
+  const { from, to } = secsWindow(day, now);
   const active = file.c.map(c => busActive(c, day));
   const out: Departure[] = [];
   file.d.forEach(([secs, ci, ri, hsi, pi], i) => {
@@ -296,8 +374,16 @@ export function busScheduled(file: BusFile, routes: RouteMap, now: Date): Depart
 }
 
 // Scheduled departures for either kind of stop file.
-export const scheduled = (file: StopFile, days: DaysFile, routes: RouteMap, now: Date) =>
-  isBus(file) ? busScheduled(file, routes, now) : renfeScheduled(file, days, routes, now);
+export const scheduled = (
+  file: StopFile,
+  days: DaysFile,
+  routes: RouteMap,
+  now: Date,
+  withLd = true,
+) =>
+  isBus(file)
+    ? busScheduled(file, routes, now)
+    : renfeScheduled(file, days, routes, now, withLd);
 
 // Self-checks: 2026-11-25 is a Wednesday, 2026-11-29 a Sunday; Madrid is UTC+1 in winter.
 console.assert(
@@ -417,6 +503,52 @@ console.assert(
     );
   })(),
   'applyRealtime delay, cancellation and live flag',
+);
+
+// Renfe lists one physical train under several trip ids (variants, or two products at once).
+// Among LD departures keep one per planned time + destination: the live one if any, else the
+// first in current order. Other departures are untouched.
+export function dedupeLd(deps: Departure[]): Departure[] {
+  const best = new Map<string, Departure>();
+  for (const d of deps) {
+    if (!d.ld) continue;
+    const k = `${d.planned.getTime()}|${d.dest}`;
+    const cur = best.get(k);
+    if (!cur || (d.live && !cur.live)) best.set(k, d);
+  }
+  return deps.filter(d => !d.ld || best.get(`${d.planned.getTime()}|${d.dest}`) === d);
+}
+console.assert(
+  (() => {
+    const t = new Date('2026-11-25T19:35:00Z');
+    const mk = (tripId: string, live: boolean, planned = t): Departure => ({
+      tripId,
+      routeId: 'L',
+      line: 'IC',
+      color: '#000',
+      text: '#fff',
+      dest: '9',
+      ld: true,
+      planned,
+      expected: planned,
+      cancelled: false,
+      live,
+    });
+    const other = mk('Z', false, new Date('2026-11-25T20:35:00Z'));
+    const out = dedupeLd([mk('002951', false), mk('002952', true), mk('37095', false), other]);
+    return out.length === 2 && out[0].tripId === '002952' && out[1] === other;
+  })(),
+  'dedupeLd keeps the live row and distinct times',
+);
+
+// Long line labels (AVLO, AVANT, Euromed) get a smaller font to fit the tile: CSS class suffix.
+export const tileSize = (line: string) => {
+  if (line.length > 4) return ' xlong';
+  return line.length === 4 ? ' long' : '';
+};
+console.assert(
+  tileSize('C10') === '' && tileSize('AVLO') === ' long' && tileSize('Euromed') === ' xlong',
+  'tileSize',
 );
 
 // CRTM stop times (undocumented website endpoint, via rt.php). XML-to-JSON style: a single child
@@ -1865,7 +1997,7 @@ export function sourceOf(routeId: string, r: RouteInfo | undefined): string {
   if (routeId.startsWith('emt_')) return 'EMT MobilityLabs (en vivo)';
   if (r?.metro) return 'CRTM (en vivo)';
   if (r?.tram) return 'CRTM (en vivo) y horario';
-  if (!r || routeId.startsWith('10T')) return 'Renfe GTFS-RT (en vivo) y horario';
+  if (!r || r.ld || routeId.startsWith('10T')) return 'Renfe GTFS-RT (en vivo) y horario';
   return 'CRTM (en vivo) y horario';
 }
 

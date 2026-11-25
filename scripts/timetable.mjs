@@ -30,6 +30,26 @@ const RENFE = {
   url: 'https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip',
   zip: `${CACHE}fomento.zip`,
 };
+// Renfe Media/Larga Distancia (Regional, Intercity, AVE, AVLO, AVANT, Euromed): stop ids are
+// shared with Cercanías. Optional: a failed download without a cached zip builds without it.
+const LD = {
+  label: 'LD',
+  url: 'https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip',
+  zip: `${CACHE}ld.zip`,
+};
+// route_short_name -> tile label, name and colours (white text unless stated).
+const LD_PRODUCTS = {
+  AVE: { line: 'AVE', color: '#6B2C91', text: '#FFFFFF' },
+  AVLO: { line: 'AVLO', color: '#C1007A', text: '#FFFFFF' },
+  AVANT: { line: 'AVANT', color: '#8A5CB8', text: '#FFFFFF' },
+  'AVANT EXP': { line: 'AVANT', color: '#8A5CB8', text: '#FFFFFF' },
+  'AVE Euromed': { line: 'Euromed', color: '#6B2C91', text: '#FFFFFF' },
+  Intercity: { line: 'IC', color: '#E05206', text: '#FFFFFF' },
+  Regional: { line: 'MD', color: '#E39B00', text: '#000000' },
+};
+// LD-only Madrid stations kept as if they were Cercanías stops (no LD train calls at both this
+// and a Cercanías station): 60000 = Puerta de Atocha.
+const LD_HUBS = ['60000'];
 const TOWN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const CRTM_LAYERS = 'https://services5.arcgis.com/UxADft6QPcvFyDU1/arcgis/rest/services';
 const NEAREST_TOWN_M = 1500;
@@ -437,6 +457,112 @@ async function buildRenfe() {
   return { routes, stops, days, files, empty, pats, trips: trips.size };
 }
 
+// ---------------------------------------------------------------- Renfe Media/Larga Distancia
+
+async function ldRoutes(zip) {
+  const routes = {};
+  for await (const r of rows(zip, 'routes.txt')) {
+    const product = LD_PRODUCTS[r.route_short_name];
+    if (product) routes[r.route_id] = { ...product, name: r.route_short_name, ld: true };
+  }
+  return routes;
+}
+
+// Trips of known products that call at a stop of `madrid` (the Cercanías Madrid stop ids).
+// Returns { trips: tripId -> { routeId, serviceId }, byTrip }.
+async function ldTrips(zip, routes, madrid) {
+  const all = new Map();
+  for await (const t of rows(zip, 'trips.txt')) {
+    if (routes[t.route_id])
+      all.set(t.trip_id, { routeId: t.route_id, serviceId: t.service_id });
+  }
+  const byTrip = await loadByTrip(zip, all);
+  const calls = list => list.some(r => madrid.has(r[2]));
+  for (const [tripId, list] of [...byTrip]) if (!calls(list)) byTrip.delete(tripId);
+  return { trips: new Map([...all].filter(([id]) => byTrip.has(id))), byTrip };
+}
+
+// Per stop: { c: [calendars], x: [[secs, ci, ri, di, pi, tripId]], r, d } (r/d are local until
+// mergeLd points them at the Cercanías file's arrays).
+function ldFiles(trips, byTrip, cals, pats) {
+  const files = new Map();
+  const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
+  const calKey = calKeys(cals);
+  for (const { tripId, list, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
+    const { routeId, serviceId } = trips.get(tripId);
+    const f = files.get(stopId) ?? { r: [], d: [], c: [], x: [], keys: [] };
+    const ci = calIndex(f, calKey, serviceId);
+    f.x.push([secs, ci, indexOf(f.r, routeId), indexOf(f.d, list.at(-1)[2]), pi, tripId]);
+    files.set(stopId, f);
+  }
+  for (const f of files.values()) {
+    delete f.keys;
+    f.x.sort((a, b) => a[0] - b[0]);
+  }
+  return files;
+}
+
+// Adds the LD stops the Cercanías set lacks (same fields as renfeStops); returns how many.
+async function ldStops(zip, touched, target) {
+  const known = new Set(target.map(s => s.id));
+  const added = (await renfeStops(zip, touched)).filter(s => !known.has(s.id));
+  target.push(...added);
+  return added.length;
+}
+
+async function buildLd(renfe) {
+  try {
+    if (!(await ensureFeed(LD))) return null;
+    const zip = LD.zip;
+    const routes = await ldRoutes(zip);
+    const madrid = new Set([...renfe.stops.map(s => s.id), ...LD_HUBS]);
+    const { trips, byTrip } = await ldTrips(zip, routes, madrid);
+    const kept = new Set([...trips.values()].map(t => t.routeId));
+    for (const id of Object.keys(routes)) if (!kept.has(id)) delete routes[id];
+    const used = new Set([...trips.values()].map(t => t.serviceId));
+    const cals = await busCalendars(zip, used);
+    const pats = makePatterns();
+    const files = ldFiles(trips, byTrip, cals, pats);
+    const touched = new Set([...byTrip.values()].flatMap(list => list.map(r => r[2])));
+    const newStops = await ldStops(zip, touched, renfe.stops);
+    return { routes, files, pats, trips: trips.size, newStops };
+  } catch (err) {
+    console.warn(`LD step failed (${err.message}): skipping`);
+    return null;
+  }
+}
+
+// Cercanías file + LD rows: { r, d, s, ld: { c, x } } with the LD rows re-pointed at the
+// merged r (route ids) and d (destination stop ids).
+function mergeLd(base, ldf) {
+  if (!ldf) return base;
+  const r = [...base.r];
+  const d = [...base.d];
+  const ri = ldf.r.map(v => indexOf(r, v));
+  const di = ldf.d.map(v => indexOf(d, v));
+  const x = ldf.x.map(([secs, c, ra, da, pi, id]) => [secs, c, ri[ra], di[da], pi, id]);
+  return { r, d, s: base.s, ld: { c: ldf.c, x } };
+}
+console.assert(
+  (() => {
+    const base = { r: ['10T1'], d: ['9'], s: {} };
+    const ldf = {
+      r: ['LD1'],
+      d: ['8', '9'],
+      c: [[127, 1, 2, [], []]],
+      x: [[5, 0, 0, 1, 3, 'T']],
+    };
+    const m = mergeLd(base, ldf);
+    return (
+      m.r.join() === '10T1,LD1' &&
+      m.d.join() === '9,8' &&
+      JSON.stringify(m.ld.x[0]) === '[5,0,1,0,3,"T"]' &&
+      mergeLd(base, undefined) === base
+    );
+  })(),
+  'mergeLd re-points LD rows at the merged route and destination arrays',
+);
+
 // ---------------------------------------------------------------- Buses
 
 // Town of a town-bus route id (`9__1__106_`: line 1 of municipality 106, province 28 = Madrid).
@@ -519,17 +645,23 @@ async function busCalendars(zip, used) {
 
 // Per stop: { kind: 'bus', r: routeIds, h: headsigns, c: [calendars], d: [[secs, ci, ri, hi, pi]] }.
 // Calendars are inlined per stop and deduplicated, so the client never needs the whole table.
+// Index of a service's calendar in a stop file's deduplicated `c` (`keys` mirrors it as JSON).
+function calIndex(f, calKey, serviceId) {
+  const key = calKey.get(serviceId) ?? JSON.stringify(EMPTY_CAL());
+  const ci = indexOf(f.keys, key);
+  if (ci === f.c.length) f.c.push(JSON.parse(key));
+  return ci;
+}
+const calKeys = cals => new Map([...cals].map(([id, cal]) => [id, JSON.stringify(cal)]));
+
 function busFiles(trips, byTrip, cals, pats) {
   const files = new Map();
   const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
-  const calKey = new Map(); // serviceId -> JSON of its calendar
-  for (const [id, cal] of cals) calKey.set(id, JSON.stringify(cal));
+  const calKey = calKeys(cals); // serviceId -> JSON of its calendar
   for (const { tripId, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
     const { routeId, serviceId, head } = trips.get(tripId);
     const f = files.get(stopId) ?? { kind: 'bus', r: [], h: [], c: [], d: [], keys: [] };
-    const key = calKey.get(serviceId) ?? JSON.stringify(EMPTY_CAL());
-    const ci = indexOf(f.keys, key);
-    if (ci === f.c.length) f.c.push(JSON.parse(key));
+    const ci = calIndex(f, calKey, serviceId);
     f.d.push([secs, ci, indexOf(f.r, routeId), indexOf(f.h, head), pi]);
     files.set(stopId, f);
   }
@@ -1104,10 +1236,11 @@ const crtmFile = (id, crtm) => {
   return found.length ? found.reduce(mergeBusFiles) : null;
 };
 
-async function writeStopFiles(stops, renfe, crtm) {
+async function writeStopFiles(stops, renfe, crtm, ld) {
   for (const s of stops) {
     if (s.k === 'e' || s.k === 'm') continue; // EMT and Metro stops have no file (live only)
-    const file = crtmFile(s.id, crtm) ?? renfe.files.get(s.id) ?? renfe.empty;
+    const base = renfe.files.get(s.id) ?? renfe.empty;
+    const file = crtmFile(s.id, crtm) ?? mergeLd(base, ld?.files.get(s.id));
     await writeFile(`${OUT}stop/${s.id}.json`, JSON.stringify(file));
   }
 }
@@ -1212,7 +1345,7 @@ const crtmLine = (name, f) =>
     ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
     : `${name}: skipped`;
 
-function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly) {
+function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly, ld) {
   const files = readdirSync(`${OUT}stop`).map(f => [f, statSync(`${OUT}stop/${f}`).size]);
   const total = files.reduce((n, [, s]) => n + s, 0);
   const [bigName, bigSize] = files.reduce((a, b) => (b[1] > a[1] ? b : a));
@@ -1220,6 +1353,11 @@ function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly) {
   const { from, to } = renfe.days;
   console.log(
     `renfe: routes ${Object.keys(renfe.routes).length}, trips ${renfe.trips}, stops ${renfe.stops.length}, days ${from}..${to}`,
+  );
+  console.log(
+    ld
+      ? `LD: routes ${Object.keys(ld.routes).length}, trips ${ld.trips}, stops ${ld.files.size} (${ld.newStops} added to Renfe stops)`
+      : 'LD: skipped',
   );
   console.log(crtmLine('bus', bus));
   console.log(crtmLine('town bus', urb));
@@ -1254,6 +1392,7 @@ function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly) {
 
 async function main() {
   const renfe = await buildRenfe();
+  const ld = await buildLd(renfe); // adds its stops to renfe.stops before towns are assigned
   const bus = await buildCrtm(BUS);
   const ml = await buildCrtm(ML);
   const urb = await buildUrban();
@@ -1288,6 +1427,7 @@ async function main() {
   await writeJson('stops-renfe.json', renfe.stops);
   await writeJson('routes.json', {
     ...renfe.routes,
+    ...ld?.routes,
     ...bus?.routes,
     ...urb?.routes,
     ...ml?.routes,
@@ -1295,11 +1435,14 @@ async function main() {
     ...emt?.routes,
   });
   await writeJson('days.json', renfe.days);
-  await writeStopFiles(stops, renfe, [bus, urb, ml].filter(Boolean));
-  await writeRouteFiles([renfe, bus, urb, ml, metro, emt]);
-  sz.lines = await writeJson('stop-lines.json', stopLines([renfe, bus, urb, ml, metro, emt]));
+  await writeStopFiles(stops, renfe, [bus, urb, ml].filter(Boolean), ld);
+  await writeRouteFiles([renfe, ld, bus, urb, ml, metro, emt]);
+  sz.lines = await writeJson(
+    'stop-lines.json',
+    stopLines([renfe, ld, bus, urb, ml, metro, emt]),
+  );
   await writeAllowList(stops);
-  report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly);
+  report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly, ld);
 }
 
 await main();

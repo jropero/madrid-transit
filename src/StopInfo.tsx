@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLdEnabled } from './ld.ts';
 import { Icon } from './icons.tsx';
 import { loadAllStops, loadRoute, loadStopLines, loadStopNames } from './data.ts';
 import {
@@ -15,6 +16,7 @@ import {
   type NearStop,
   type RouteInfo,
   type RouteMap,
+  tileSize,
   type Saved,
   short,
   type Stop,
@@ -55,39 +57,81 @@ async function describeLines(
   stopId: string,
   routeIds: string[],
   routes: RouteMap,
+  ld: boolean,
 ): Promise<LineInfo[]> {
   const names = await loadStopNames();
-  const known = routeIds.filter(id => routes[id]).slice(0, MAX_LINES);
+  const known = capLines(routeIds, routes, ld);
   const files = await Promise.all(known.map(id => loadRoute(id).catch(() => ({ p: [] }))));
-  return known
-    .map((routeId, i) => ({
-      routeId,
-      route: routes[routeId],
-      end: classifyEnd(files[i].p, stopId),
-      dests: destinationsAfter(files[i].p, stopId).map(d => names.get(d) ?? d),
-    }))
-    .sort(byLine);
+  return distinctRows(
+    known
+      .map((routeId, i) => ({
+        routeId,
+        route: routes[routeId],
+        end: classifyEnd(files[i].p, stopId),
+        dests: destinationsAfter(files[i].p, stopId).map(d => names.get(d) ?? d),
+      }))
+      .sort(byLine),
+  );
 }
+
+// Known routes of a stop, at most MAX_LINES each of Cercanías/other and (when on) LD routes.
+function capLines(routeIds: string[], routes: RouteMap, ld: boolean): string[] {
+  const known = routeIds.filter(id => routes[id]);
+  return [
+    ...known.filter(id => !routes[id].ld).slice(0, MAX_LINES),
+    ...(ld ? known.filter(id => routes[id].ld).slice(0, MAX_LINES) : []),
+  ];
+}
+
+// Renfe has many route ids per LD product: one row per displayed label, colour and direction.
+export function distinctRows(rows: LineInfo[]): LineInfo[] {
+  const seen = new Set<string>();
+  return rows.filter(l => {
+    const k = [l.route.line, l.route.color, l.end, l.dests.join(',')].join('|');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+console.assert(
+  (() => {
+    const route = { line: 'MD', color: '#111', text: '#fff' };
+    const row = (routeId: string, end: End, dests: string[]): LineInfo => ({
+      routeId,
+      route,
+      end,
+      dests,
+    });
+    const out = distinctRows([
+      row('a', null, ['Cáceres']),
+      row('b', null, ['Cáceres']),
+      row('c', null, ['Madrid']),
+    ]);
+    return out.length === 2 && out[0].routeId === 'a';
+  })(),
+  'distinctRows',
+);
 
 function useLineInfos(stopId: string, routes: RouteMap): LineInfo[] | null {
   const map = useLinesMap();
+  const ld = useLdEnabled();
   const [lines, setLines] = useState<{ id: string; list: LineInfo[] } | null>(null);
   useEffect(() => {
     if (!map) return;
     let current = true;
-    describeLines(stopId, map[stopId] ?? [], routes).then(
+    describeLines(stopId, map[stopId] ?? [], routes, ld).then(
       list => current && setLines({ id: stopId, list }),
       () => current && setLines({ id: stopId, list: [] }),
     );
     return () => {
       current = false;
     };
-  }, [map, stopId, routes]);
+  }, [map, stopId, routes, ld]);
   return lines?.id === stopId ? lines.list : null;
 }
 
 const vehicle = (r: RouteInfo, routeId: string) =>
-  routeId.startsWith('emt_') || !(r.metro || r.tram || routeId.startsWith('10T'))
+  routeId.startsWith('emt_') || !(r.metro || r.tram || r.ld || routeId.startsWith('10T'))
     ? 'autobuses'
     : 'trenes';
 
@@ -134,6 +178,17 @@ console.assert(
 const tileStyle = (r: RouteInfo) =>
   ({ '--tile': r.color, '--tile-text': r.text }) as React.CSSProperties;
 
+// One row per displayed line label and colour (Renfe has many route ids per LD product).
+function distinctLines(lines: LineInfo[]): LineInfo[] {
+  const seen = new Set<string>();
+  return lines.filter(l => {
+    const k = `${l.route.line}|${l.route.color}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 // Shown instead of the bare "no departures" line: what serves the stop and why it may be blank.
 export function NoDepartures({
   stopId,
@@ -147,12 +202,13 @@ export function NoDepartures({
   fallback: string;
 }) {
   const lines = useLineInfos(stopId, routes);
-  if (!lines?.length) return <p className="status">{fallback}</p>;
+  const shown = distinctLines(lines ?? []);
+  if (!shown.length) return <p className="status">{fallback}</p>;
   return (
     <ul className="svc-list">
-      {lines.map(l => (
+      {shown.map(l => (
         <li key={l.routeId}>
-          <span className="tile mini" style={tileStyle(l.route)}>
+          <span className={`tile mini${tileSize(l.route.line)}`} style={tileStyle(l.route)}>
             <b>{l.route.line}</b>
           </span>
           <span>{lineText(l, '', new Date(now))}</span>
@@ -194,11 +250,23 @@ export function InfoButton({
 const osmUrl = (s: Stop) =>
   `https://www.openstreetmap.org/?mlat=${s.lat}&mlon=${s.lon}#map=18/${s.lat}/${s.lon}`;
 
-function Facts({ stop }: { stop: Stop }) {
+// Renfe stations: Cercanías, media y larga distancia, or both, from the routes serving them.
+function renfeKind(stop: Stop, ids: string[] | undefined, routes: RouteMap): string {
+  const kind = stopKind(stop);
+  if (stop.k !== 'r' || !ids) return kind;
+  const known = ids.filter(id => routes[id]);
+  const parts = [
+    known.some(id => !routes[id].ld) && 'Cercanías',
+    known.some(id => routes[id].ld) && 'media y larga distancia',
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : kind;
+}
+
+function Facts({ stop, kind }: { stop: Stop; kind: string }) {
   const rows: [string, React.ReactNode][] = [
     ['Dirección', stop.desc],
     ['Código', stop.code],
-    ['Tipo', stopKind(stop)],
+    ['Tipo', kind],
     ['Municipio', stop.town],
     ['Sin escalones', stop.wa ? 'sí' : 'no consta'],
   ];
@@ -233,7 +301,7 @@ function LineRows({
         const rate = rateOf(l, gap ? `cada ~${gap} min` : '', now);
         return (
           <li key={l.routeId}>
-            <span className="tile mini" style={tileStyle(l.route)}>
+            <span className={`tile mini${tileSize(l.route.line)}`} style={tileStyle(l.route)}>
               <b>{l.route.line}</b>
             </span>
             <span>
@@ -352,7 +420,7 @@ export function StopInfo({
     );
   return (
     <section className="info" id={id} aria-label="Información de la parada">
-      <Facts stop={stop} />
+      <Facts stop={stop} kind={renfeKind(stop, linesMap?.[stop.id], routes)} />
       <p>
         <a href={osmUrl(stop)} target="_blank" rel="noopener">
           ver en mapa

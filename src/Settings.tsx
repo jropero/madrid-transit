@@ -2,11 +2,13 @@ import { useEffect, useState } from 'react';
 import { loadTimetable } from './data.ts';
 import { ddmm } from './gtfs.ts';
 import { THEMES, applyTheme, loadTheme, type Theme } from './theme.ts';
+import { setLdEnabled, useLdEnabled } from './ld.ts';
 import { ACCENTS, applyAccent, loadAccent, type AccentName } from './accent.ts';
 
 export default function Settings() {
   const [accent, setAccent] = useState<AccentName>(loadAccent);
   const [theme, setTheme] = useState<Theme>(loadTheme);
+  const ld = useLdEnabled();
   const [updated, setUpdated] = useState('');
   useEffect(() => {
     loadTimetable().then(
@@ -31,6 +33,12 @@ export default function Settings() {
             {t.label}
           </button>
         ))}
+      </div>
+      <h2 className="title">trenes</h2>
+      <div className="themes">
+        <button className="btn tilt" aria-pressed={ld} onClick={() => setLdEnabled(!ld)}>
+          trenes de media y larga distancia
+        </button>
       </div>
       <h2 className="title">color de acento</h2>
       <div className="swatches">

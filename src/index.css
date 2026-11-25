@@ -454,6 +454,15 @@ p.next {
   letter-spacing: -0.02em;
 }
 
+.tile.long b {
+  font-size: 24px;
+}
+
+.tile.xlong b {
+  font-size: 17px;
+  letter-spacing: 0;
+}
+
 .tile small {
   position: absolute;
   left: 6px;
@@ -761,7 +770,8 @@ p.next {
   color: var(--muted);
 }
 
-.alert-sub {
+.alert-sub,
+.section-sub {
   margin: 10px 0 0;
   font-size: var(--t-small);
   font-weight: 600;
@@ -912,6 +922,15 @@ p.next {
 .tile.mini b {
   inset: 0;
   font-size: 18px;
+}
+
+.tile.mini.long b {
+  font-size: 12px;
+}
+
+.tile.mini.xlong b {
+  font-size: 9px;
+  letter-spacing: 0;
 }
 
 .end-tag {

@@ -41,7 +41,8 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: path => {
           const f = new URL(path, 'http://x').searchParams.get('f');
-          return f === 'trip_updates' || f === 'alerts' ? `/${f}.json` : '/404';
+          const feeds: (string | null)[] = ['trip_updates', 'trip_updates_LD', 'alerts'];
+          return feeds.includes(f) ? `/${f}.json` : '/404';
         },
       },
     },

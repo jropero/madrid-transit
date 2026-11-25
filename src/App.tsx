@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
+import { useLdEnabled } from './ld.ts';
 import Trail from './Trail.tsx';
 import { useStopNav, type Nav } from './nav.ts';
 import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
@@ -13,6 +14,7 @@ import {
   fetchEmt,
   directCrtm,
   fetchTripUpdates,
+  fetchTripUpdatesLd,
   isOffline,
   warmOffline,
   isTimeout,
@@ -23,6 +25,8 @@ import {
 } from './data.ts';
 import {
   applyRealtime,
+  dedupeLd,
+  tileSize,
   compareLines,
   daysUntil,
   emtDepartures,
@@ -140,7 +144,7 @@ const renfeFailure = (err: unknown) => {
 };
 
 // Live feeds: failures keep the previous data.
-function useRealtime(active: boolean) {
+function useRealtime(active: boolean, withLd: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
   const [status, setStatus] = useState<Status>('Cargando…');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
@@ -149,9 +153,14 @@ function useRealtime(active: boolean) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [trips, alerts] = await Promise.all([fetchTripUpdates(), fetchAlerts()]);
+      const [trips, alerts, ld] = await Promise.all([
+        fetchTripUpdates(),
+        fetchAlerts(),
+        withLd ? fetchTripUpdatesLd().catch(() => null) : null,
+      ]);
       const offline = trips.offlineSince ?? alerts.offlineSince;
-      setRt({ trips: trips.data, alerts: parseAlerts(alerts.data), offline });
+      const merged = { entity: [...(trips.data.entity ?? []), ...(ld?.data.entity ?? [])] };
+      setRt({ trips: merged, alerts: parseAlerts(alerts.data), offline });
       setStatus(
         offline
           ? `sin conexión · desde ${hhmm(offline)}`
@@ -163,7 +172,7 @@ function useRealtime(active: boolean) {
       setLoading(false);
       setLoadedAt(Date.now());
     }
-  }, []);
+  }, [withLd]);
 
   useEffect(() => {
     void load();
@@ -397,6 +406,7 @@ const modeLabel = (d: Departure) => {
   if (d.metro) return 'metro';
   if (d.tram) return 'tranvía';
   if (d.urban) return 'urbano';
+  if (d.ld) return d.mode ?? 'tren';
   return d.bus ? 'bus' : 'cercanías';
 };
 
@@ -432,7 +442,7 @@ function LineGroup({
         aria-controls={open ? panel : undefined}
         onClick={() => setOpen(!open)}
       >
-        <span className="tile" style={tile}>
+        <span className={`tile${tileSize(head.line)}`} style={tile}>
           <b>{head.line}</b>
           <small>{modeLabel(head)}</small>
         </span>
@@ -628,6 +638,7 @@ type Sources = {
   crtm: CrtmRow[] | null;
   emt: EmtRow[] | null;
   metro: boolean;
+  ld: boolean;
 };
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
@@ -635,22 +646,22 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   // Metro: live times only, no timetable.
   if (src.metro) return mergeCrtm([], src.crtm, tt.routes, at);
   if (!src.list) return [];
-  const planned = scheduled(src.list, tt.days, tt.routes, at);
+  const planned = scheduled(src.list, tt.days, tt.routes, at, src.ld);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
   return isBus(src.list)
     ? mergeCrtm(planned, src.crtm, tt.routes, at)
-    : applyRealtime(planned, src.trips);
+    : dedupeLd(applyRealtime(planned, src.trips));
 }
 
 function useDepartureList(tt: Timetable | null, src: Sources) {
   const now = useNow();
-  const { list, trips, crtm, emt, metro } = src;
+  const { list, trips, crtm, emt, metro, ld } = src;
   const deps = useMemo(
     () =>
       tt
-        ? upcoming(departuresAt(tt, { list, trips, crtm, emt, metro }, new Date(now)), now)
+        ? upcoming(departuresAt(tt, { list, trips, crtm, emt, metro, ld }, new Date(now)), now)
         : [],
-    [tt, list, trips, crtm, emt, metro, now],
+    [tt, list, trips, crtm, emt, metro, ld, now],
   );
   return { deps, now };
 }
@@ -732,11 +743,12 @@ function Departures({
   }, [showSearch, towns.length]);
   const { tt, error } = useTimetable();
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
+  const ld = useLdEnabled();
   const bus = isBus(stopDeps);
   const isEmt = isEmtId(selected.id);
   const isMetro = isMetroId(selected.id);
   const useCrtmFeed = bus || isMetro;
-  const renfe = useRealtime(active && !useCrtmFeed && !isEmt);
+  const renfe = useRealtime(active && !useCrtmFeed && !isEmt, ld);
   const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro, stopDeps);
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
@@ -746,6 +758,7 @@ function Departures({
     crtm: crtm.rows,
     emt: emt.rows,
     metro: isMetro,
+    ld,
   });
   const renfeStop = !useCrtmFeed && !isEmt;
   const statusText = rt.statusText(deps.some(d => d.live));
@@ -760,7 +773,10 @@ function Departures({
   const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
   const board = useAlertBoard(alerts, routeIds, lines);
   const destName = (id: string) => stopById.get(id)?.name ?? id;
-  const groups = groupDepartures(deps, destName);
+  // Cercanías and every other mode first, media/larga distancia in its own section after them.
+  const allGroups = groupDepartures(deps, destName);
+  const groups = allGroups.filter(([, l]) => !l[0].ld);
+  const ldGroups = allGroups.filter(([, l]) => l[0].ld);
   // From a line's stop list: select the stop (not saved) and return the pane to the top.
   const showStop = (s: Saved, el: HTMLElement, lineKey: string) => {
     onJump({ id: s.id, name: s.name }, lineKey);
@@ -795,7 +811,7 @@ function Departures({
   }
 
   const empty =
-    tt && hasStopData(stopDeps, isMetro ? crtm.rows : emt.rows) && groups.length === 0;
+    tt && hasStopData(stopDeps, isMetro ? crtm.rows : emt.rows) && allGroups.length === 0;
   return (
     <>
       {active && (
@@ -867,18 +883,22 @@ function Departures({
 
       <Alerts board={board} />
 
-      {groups.map(([key, list]) => (
-        <LineGroup
-          key={`${selected.id}|${key}`}
-          list={list}
-          lineKey={key}
-          defaultOpen={openLine === key}
-          stopId={selected.id}
-          destName={destName(list[0].dest)}
-          hasAlert={board.marks(list[0].routeId, list[0].line)}
-          now={now}
-          onSelect={showStop}
-        />
+      {[...groups, ...ldGroups].map(([key, list], i) => (
+        <Fragment key={`${selected.id}|${key}`}>
+          {ldGroups.length > 0 && i === groups.length && (
+            <h3 className="section-sub">media y larga distancia</h3>
+          )}
+          <LineGroup
+            list={list}
+            lineKey={key}
+            defaultOpen={openLine === key}
+            stopId={selected.id}
+            destName={destName(list[0].dest)}
+            hasAlert={board.marks(list[0].routeId, list[0].line)}
+            now={now}
+            onSelect={showStop}
+          />
+        </Fragment>
       ))}
       {empty && (
         <NoDepartures
