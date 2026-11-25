@@ -199,7 +199,7 @@ function Facts({ stop }: { stop: Stop }) {
     ['Código', stop.code],
     ['Tipo', stopKind(stop)],
     ['Municipio', stop.town],
-    ['Sin escalones', stop.wa ? '♿ sí' : 'no consta'],
+    ['Sin escalones', stop.wa ? 'sí' : 'no consta'],
   ];
   return (
     <dl className="facts">

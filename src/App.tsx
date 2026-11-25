@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import AppBar from './AppBar.tsx';
+import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
@@ -114,6 +114,15 @@ function usePolling(
   }, [active, load]);
 }
 
+// Renfe feed failure: a timeout falls back to the timetable.
+const renfeFailure = (err: unknown) => {
+  if (isTimeout(err))
+    return liveStatusText({ kind: 'timeout', label: 'Renfe', timetable: true });
+  return isOffline(err)
+    ? 'sin conexión · sin datos en vivo'
+    : `sin datos en vivo: ${String(err)}`;
+};
+
 // Live feeds: failures keep the previous data.
 function useRealtime(active: boolean) {
   const [rt, setRt] = useState<Realtime>({ trips: null, alerts: [], offline: null });
@@ -131,11 +140,7 @@ function useRealtime(active: boolean) {
         offline ? `sin conexión · desde ${hhmm(offline)}` : `datos en vivo ${hhmm(new Date())}`,
       );
     } catch (err) {
-      setStatus(
-        isOffline(err)
-          ? 'sin conexión · sin datos en vivo'
-          : `sin datos en vivo: ${String(err)}`,
-      );
+      setStatus(renfeFailure(err));
     } finally {
       setLoading(false);
       setLoadedAt(Date.now());
@@ -197,7 +202,7 @@ function crtmStatus(rows: CrtmRow[], feed: Feed, timetable: boolean): Status {
 }
 
 const crtmFailure = (err: unknown, timetable: boolean): Status => {
-  if (isTimeout(err)) return liveStatusText({ kind: 'timeout', label: 'CRTM' });
+  if (isTimeout(err)) return liveStatusText({ kind: 'timeout', label: 'CRTM', timetable });
   const none = timetable ? 'solo horario' : 'sin datos en vivo';
   return isOffline(err) ? `sin conexión · ${none}` : none;
 };
@@ -281,7 +286,7 @@ async function loadEmtRows(stopId: string): Promise<EmtLoad> {
     ['CRTM', crtm],
   ].find(([, t]) => t === 'timeout');
   const status = timedOut
-    ? liveStatusText({ kind: 'timeout', label: String(timedOut[0]) })
+    ? liveStatusText({ kind: 'timeout', label: String(timedOut[0]), timetable: false })
     : 'sin datos en vivo';
   return { rows: [], status, alerts: [] };
 }
@@ -505,6 +510,11 @@ function SearchPanel({
   );
 }
 
+// "Guardar parada" for a stop opened from a line list, a connection or search; saved stops
+// have none (the menu offers "eliminar parada").
+const saveAction = (saved: boolean, onClick: () => void): BarAction[] =>
+  saved ? [] : [{ icon: 'star', label: 'Guardar parada', text: 'guardar', onClick }];
+
 function StopsRow({
   stops,
   selected,
@@ -520,7 +530,12 @@ function StopsRow({
   return (
     <nav className="stops" aria-label="Paradas guardadas">
       {row.map(s => (
-        <button key={s.id} aria-current={s.id === selected.id} onClick={() => onSelect(s)}>
+        <button
+          key={s.id}
+          className={stops.some(x => x.id === s.id) ? undefined : 'unsaved'}
+          aria-current={s.id === selected.id}
+          onClick={() => onSelect(s)}
+        >
           {short(s.name)}
         </button>
       ))}
@@ -727,6 +742,7 @@ function Departures({
               onClick: () => setShowSearch(!showSearch),
             },
             { icon: 'nearMe', label: 'Cerca de mí', onClick: nearMe },
+            ...saveAction(isSaved(selected), () => onStops([...stops, selected])),
           ]}
           menu={[
             {

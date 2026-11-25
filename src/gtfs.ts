@@ -1405,7 +1405,7 @@ export const hhmm = (d: Date) =>
 // fresh with the age of the answer (omitted under 10 s).
 export type LiveStatus =
   | { kind: 'waiting'; label: string; waitedMs: number }
-  | { kind: 'timeout'; label: string }
+  | { kind: 'timeout'; label: string; timetable: boolean }
   | { kind: 'fresh'; label: string; fetchedAt: number; now: number };
 
 const ageNote = (ms: number) => {
@@ -1421,7 +1421,9 @@ const waitingText = (label: string, waitedMs: number) =>
 
 export function liveStatusText(s: LiveStatus): string {
   if (s.kind === 'waiting') return waitingText(s.label, s.waitedMs);
-  if (s.kind === 'timeout') return `${s.label} no responde · mostrando horario`;
+  if (s.kind === 'timeout') {
+    return `${s.label} no responde · ${s.timetable ? 'mostrando horario' : 'reintentando'}`;
+  }
   const at = hhmm(new Date(s.fetchedAt));
   return `en vivo · ${s.label} ${at}${ageNote(Math.max(0, s.now - s.fetchedAt))}`;
 }
@@ -1441,8 +1443,14 @@ export function liveStatusText(s: LiveStatus): string {
     'waiting 5 s',
   );
   console.assert(
-    liveStatusText({ kind: 'timeout', label: 'EMT' }) === 'EMT no responde · mostrando horario',
-    'timeout',
+    liveStatusText({ kind: 'timeout', label: 'Renfe', timetable: true }) ===
+      'Renfe no responde · mostrando horario',
+    'timeout with timetable',
+  );
+  console.assert(
+    liveStatusText({ kind: 'timeout', label: 'EMT', timetable: false }) ===
+      'EMT no responde · reintentando',
+    'timeout without timetable',
   );
   console.assert(fresh(3000) === 'en vivo · CRTM 15:44', 'fresh');
   console.assert(fresh(40_000) === 'en vivo · CRTM 15:44 (hace 40 s)', '40 s old');

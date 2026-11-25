@@ -179,6 +179,6 @@ export const AccessMark = ({ on }: { on: boolean }) =>
       aria-label="acceso sin escalones"
       title="acceso sin escalones"
     >
-      <Icon name="access" size={16} />
+      <Icon name="access" size={22} />
     </span>
   ) : null;
