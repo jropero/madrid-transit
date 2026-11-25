@@ -281,8 +281,10 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
   const delay = Math.round((d.expected.getTime() - d.planned.getTime()) / 60000);
   const left = Math.max(0, Math.floor((d.expected.getTime() - now) / 60000));
   return (
-    <span className={d.cancelled ? 'dep cancelled' : 'dep'}>
+    <span className={`dep${d.cancelled ? ' cancelled' : ''}${d.live ? ' is-live' : ''}`}>
+      {d.live && <span className="dot" aria-hidden="true" />}
       <span className="time">{hhmm(d.planned)}</span>
+      {d.live && <span className="sr-only"> en vivo</span>}
       {delay > 0 && !d.cancelled && <span className="late">+{delay}'</span>}
       {d.cancelled ? (
         <span className="tag bad">cancelado</span>
