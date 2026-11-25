@@ -83,7 +83,13 @@ export type TripUpdates = {
     };
   }[];
 };
-export type Alert = { id: string; routeIds: string[]; text: string; from: Date | null };
+export type Alert = {
+  id: string;
+  routeIds: string[];
+  title: string;
+  text: string;
+  from: Date | null;
+};
 export type AlertFeed = {
   entity?: {
     id?: string;
@@ -706,11 +712,12 @@ const plainText = (html: string) => {
 type EmtIncident = { guid?: string; title?: string; description?: string };
 const toIncident = (i: EmtIncident | null | undefined): Alert | null => {
   const id = i?.guid?.trim();
-  const text = [i?.title, i?.description && plainText(i.description)]
+  const title = i?.title?.trim() ?? '';
+  const text = [title, i?.description && plainText(i.description)]
     .map(t => t?.trim() ?? '')
     .filter(Boolean)
     .join(' ');
-  return id && text ? { id, routeIds: [], text, from: null } : null;
+  return id && text ? { id, routeIds: [], title: title || text, text, from: null } : null;
 };
 
 export function parseEmtIncidents(json: EmtJson | null): Alert[] {
@@ -834,7 +841,8 @@ function toAlert(e: AlertEntity, now: number): Alert | null {
   const end = Number(a?.activePeriod?.[0]?.end) * 1000;
   const active = !(start > now) && !(end < now);
   if (!e.id || !routeIds.length || !text || !active) return null;
-  return { id: e.id, routeIds, text, from: start ? new Date(start) : null };
+  const title = firstText(a?.headerText) || text;
+  return { id: e.id, routeIds, title, text, from: start ? new Date(start) : null };
 }
 
 // Active alerts that name a Madrid núcleo route (Spanish text as supplied).
@@ -868,6 +876,62 @@ export const alertsFor = (alerts: Alert[], routeIds: Set<string>) =>
 
 const fold = (s: string) => s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 console.assert(fold('Chamartín') === 'chamartin', 'fold');
+
+// Line short names an alert text mentions after "línea(s)" ("líneas 14, 43, 120 y 150") or as
+// "L1"; whole tokens only, lower case, so "línea 140" never matches "14".
+const LINE_TOKEN = '[a-z]{0,2}\\d+[a-z]?';
+const LINE_LIST = new RegExp(
+  `\\blineas?\\s+(${LINE_TOKEN}(?:\\s*(?:,|y|e|o|/)\\s*${LINE_TOKEN})*)`,
+  'g',
+);
+export function mentionedLines(text: string): Set<string> {
+  const folded = fold(text);
+  const lists = [...folded.matchAll(LINE_LIST)].flatMap(m => m[1].split(/[^a-z0-9]+/));
+  const prefixed = [...folded.matchAll(/\bl(\d{1,3})\b/g)].map(m => m[1]);
+  return new Set([...lists, ...prefixed].filter(t => /\d/.test(t)));
+}
+
+// Relevant to a stop: names one of its routes, or (no route ids, e.g. EMT incidents) mentions
+// one of its lines.
+export const isRelevant = (a: Alert, routeIds: Set<string>, lines: Set<string>) =>
+  a.routeIds.length
+    ? a.routeIds.some(r => routeIds.has(r))
+    : [...mentionedLines(a.text)].some(l => lines.has(l));
+console.assert(
+  (() => {
+    const al = (text: string): Alert => ({
+      id: 'x',
+      routeIds: [],
+      title: text,
+      text,
+      from: null,
+    });
+    const lines = new Set(['14', '27']);
+    const m = (t: string) => [...mentionedLines(t)].join();
+    return (
+      isRelevant(
+        al('Desvío: las líneas 14, 43, 120 y 150, tendrán parada…'),
+        new Set(),
+        lines,
+      ) &&
+      isRelevant(al('Desvío de la línea 27 por obras'), new Set(), lines) &&
+      isRelevant(al('Corte en L14'), new Set(), lines) &&
+      !isRelevant(al('Afectada la línea 140'), new Set(), lines) &&
+      !isRelevant(al('Líneas 114 y 214'), new Set(), lines) &&
+      !isRelevant(al('Evento en el Bernabéu, 14 de noviembre'), new Set(), lines) &&
+      m('Línea N1 y línea 5.') === 'n1,5'
+    );
+  })(),
+  'mentionedLines / isRelevant: lists, singular, L-prefix, whole-token only',
+);
+
+// Short stable hash of an alert text, to notice when a dismissed alert changes.
+export const textHash = (s: string) => {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+};
+console.assert(textHash('a') !== textHash('b') && textHash('a') === textHash('a'), 'textHash');
 
 // Ranks a stop for a search: exact stop code, exact name ("Parla" the station beats the
 // town's bus stops), name prefix or exact town, name substring, town substring, street;

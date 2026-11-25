@@ -613,28 +613,77 @@ p.next {
 }
 
 /* Service alerts, cancellations, platform changes */
-.alert {
+.alerts {
   border-left: 4px solid var(--late);
   padding: 4px 0 4px 10px;
   margin: 0 0 10px;
 }
 
-.alert button {
-  text-align: left;
+.alert-bar,
+.alert-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
   width: 100%;
+  min-width: 0;
+  text-align: left;
 }
 
-.alert button[aria-expanded='false'] span {
-  display: block;
-  max-height: 3.2em;
+/* Keep "4 avisos" on one line; the title takes the remaining width. */
+.alert-bar b {
+  flex: none;
+  white-space: nowrap;
+}
+
+.alert-title,
+.alert-row span {
+  min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.alert p {
+.alert-list {
   margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alert-list li {
+  padding: 4px 0;
+}
+
+.alert-row {
+  font-size: var(--t-small);
+}
+
+.alert-full {
+  display: block;
+  margin-top: 4px;
   font-size: var(--t-small);
   color: var(--muted);
   white-space: pre-line;
+}
+
+.alert-hide,
+.alert-hidden button {
+  margin-left: 8px;
+  text-decoration: underline;
+  color: var(--accent);
+}
+
+.alert-hidden {
+  margin: 4px 0 0;
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+.alert-sub {
+  margin: 10px 0 0;
+  font-size: var(--t-small);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: lowercase;
 }
 
 .warn-mark {

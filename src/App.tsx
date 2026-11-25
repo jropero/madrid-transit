@@ -3,7 +3,7 @@ import AppBar from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
-import Alerts, { AccessMark, AlertMark } from './Alerts.tsx';
+import Alerts, { AccessMark, AlertMark, useAlertBoard } from './Alerts.tsx';
 import {
   fetchAlerts,
   fetchCrtm,
@@ -608,6 +608,8 @@ function Departures({
   const wa = info?.wa ?? false;
   const town = info?.town;
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
+  const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
+  const board = useAlertBoard(alerts, routeIds, lines);
   const groups = groupDepartures(deps);
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
 
@@ -694,7 +696,7 @@ function Departures({
         />
       )}
 
-      <Alerts alerts={alerts} routeIds={routeIds} />
+      <Alerts board={board} />
 
       {groups.map(([key, list]) => (
         <LineGroup
@@ -702,7 +704,7 @@ function Departures({
           list={list}
           stopId={selected.id}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
-          hasAlert={alerts.some(a => a.routeIds.includes(list[0].routeId))}
+          hasAlert={board.marks(list[0].routeId, list[0].line)}
           now={now}
         />
       ))}
