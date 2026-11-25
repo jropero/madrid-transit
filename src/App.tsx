@@ -3,6 +3,7 @@ import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops from './NextStops.tsx';
 import Settings from './Settings.tsx';
+import { useStopNav, type Nav } from './nav.ts';
 import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
 import Alerts, { AccessMark, AlertMark, useAlertBoard } from './Alerts.tsx';
 import {
@@ -381,6 +382,8 @@ const modeLabel = (d: Departure) => {
 // A line and its next departures; tapping it lists the remaining stops of the next one.
 function LineGroup({
   list,
+  lineKey,
+  defaultOpen,
   destName,
   stopId,
   hasAlert,
@@ -388,13 +391,15 @@ function LineGroup({
   onSelect,
 }: {
   list: Departure[];
+  lineKey: string;
+  defaultOpen: boolean;
   destName: string;
   stopId: string;
   hasAlert: boolean;
   now: number;
-  onSelect: (s: Saved, el: HTMLElement) => void;
+  onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const head = list[0];
   const tile = { '--tile': head.color, '--tile-text': head.text } as React.CSSProperties;
   const panel = `next-${head.routeId}-${head.tripId}`;
@@ -421,7 +426,14 @@ function LineGroup({
           ))}
         </span>
       </button>
-      {open && <NextStops dep={head} stopId={stopId} id={panel} onSelect={onSelect} />}
+      {open && (
+        <NextStops
+          dep={head}
+          stopId={stopId}
+          id={panel}
+          onSelect={(s, el) => onSelect(s, el, lineKey)}
+        />
+      )}
     </section>
   );
 }
@@ -643,20 +655,36 @@ function stopCodeLabel(info: Stop | undefined, id: string): string {
 
 const INFO_PANEL = 'stop-info';
 
+// Shown under the title when the stop was reached by a jump; system back undoes the jump.
+function BackLink({ name }: { name: string }) {
+  return (
+    <button
+      className="back tilt"
+      aria-label={`Volver a ${name}`}
+      onClick={() => history.back()}
+    >
+      ‹ volver a {name}
+    </button>
+  );
+}
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
-  selected,
+  nav,
   active,
   onSelect,
+  onJump,
   onStops,
 }: {
   stops: Saved[];
-  selected: Saved;
+  nav: Nav;
   active: boolean;
   onSelect: (s: Saved) => void;
+  onJump: (s: Saved, openLine?: string) => void;
   onStops: (next: Saved[]) => void;
 }) {
+  const { stop: selected, from, openLine } = nav;
   const [query, setQuery] = useState('');
   const [townQuery, setTownQuery] = useState('');
   const [towns, setTowns] = useState<string[]>([]);
@@ -701,8 +729,8 @@ function Departures({
   const board = useAlertBoard(alerts, routeIds, lines);
   const groups = groupDepartures(deps);
   // From a line's stop list: select the stop (not saved) and return the pane to the top.
-  const showStop = (s: Saved, el: HTMLElement) => {
-    onSelect({ id: s.id, name: s.name });
+  const showStop = (s: Saved, el: HTMLElement, lineKey: string) => {
+    onJump({ id: s.id, name: s.name }, lineKey);
     el.closest('.pane')?.scrollTo({ top: 0 });
   };
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
@@ -772,6 +800,7 @@ function Departures({
         <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
       </h2>
       {subtitle && <small className="sub">{subtitle}</small>}
+      {from && <BackLink name={short(from.name)} />}
       {infoOpen && tt && (
         <StopInfo
           id={INFO_PANEL}
@@ -779,7 +808,7 @@ function Departures({
           routes={tt.routes}
           deps={deps}
           now={now}
-          onSelect={onSelect}
+          onSelect={s => onJump(s)}
         />
       )}
 
@@ -794,7 +823,7 @@ function Departures({
           results={results}
           isSaved={isSaved}
           onShow={s => {
-            onSelect({ id: s.id, name: s.name });
+            onJump({ id: s.id, name: s.name });
             setResults([]);
             setShowSearch(false);
           }}
@@ -808,6 +837,8 @@ function Departures({
         <LineGroup
           key={`${selected.id}|${key}`}
           list={list}
+          lineKey={key}
+          defaultOpen={openLine === key}
           stopId={selected.id}
           destName={stopById.get(list[0].dest)?.name ?? list[0].dest}
           hasAlert={board.marks(list[0].routeId, list[0].line)}
@@ -945,7 +976,7 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
 
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
-  const [selected, setSelected] = useState<Saved>(stops[0]);
+  const { nav, select, jump, toast } = useStopNav(stops[0]);
   const { scroller, view, onScroll, goTo } = usePivot();
 
   function updateStops(next: Saved[]) {
@@ -968,14 +999,18 @@ export default function App() {
           'departures',
           <Departures
             stops={stops}
-            selected={selected}
+            nav={nav}
             active={view === 'departures'}
-            onSelect={setSelected}
+            onSelect={select}
+            onJump={jump}
             onStops={updateStops}
           />,
         )}
         {pane('settings', <Settings />)}
       </div>
+      <p className="toast" role="status" aria-live="polite">
+        {toast && <span>Vuelve atrás otra vez para salir</span>}
+      </p>
     </main>
   );
 }

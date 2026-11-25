@@ -612,6 +612,7 @@ p.next {
   }
 
   .dest .live::before,
+  .toast span,
   .turn,
   .bar-menu,
   .views-row {
@@ -865,4 +866,44 @@ p.next {
 
 .near .dist {
   color: var(--muted);
+}
+
+.back {
+  display: block;
+  margin: 0 0 8px;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-small);
+  text-align: left;
+  cursor: pointer;
+}
+
+.toast {
+  position: fixed;
+  right: 0;
+  bottom: calc(88px + env(safe-area-inset-bottom));
+  left: 0;
+  z-index: 30;
+  margin: 0;
+  text-align: center;
+  pointer-events: none;
+}
+
+.toast span {
+  display: inline-block;
+  padding: 10px 16px;
+  background: var(--bar);
+  color: var(--fg);
+  font-size: var(--t-small);
+  animation: toast-in 0.2s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
 }
