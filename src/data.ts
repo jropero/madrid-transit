@@ -214,8 +214,8 @@ export const loadStopLines = () =>
     getJson<Record<string, string[]>>(`${base}data/stop-lines.json`),
   );
 
-// Best-effort: load the files an offline session needs (through the memoised loaders, so they
-// also land in the service worker cache), one request at a time.
+// Best-effort: load the files an offline session needs so they land in the service worker cache,
+// one request at a time (stop files bypass the memo: the first one may predate the worker).
 const quietly = (load: () => Promise<unknown>) => load().then(undefined, () => undefined);
 
 export async function warmOffline(ids: string[]) {
@@ -223,7 +223,9 @@ export async function warmOffline(ids: string[]) {
   await quietly(loadAllStops);
   await quietly(loadStopLines);
   for (const id of ids.filter(i => !i.startsWith('emt_') && !i.startsWith('par_4_'))) {
-    const file = await loadStopDeps(id).then(
+    const file = await getJson<StopFile>(
+      `${base}data/stop/${encodeURIComponent(id)}.json`,
+    ).then(
       f => f,
       () => null,
     );
