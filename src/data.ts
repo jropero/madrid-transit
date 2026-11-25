@@ -1,15 +1,19 @@
 // Loading of the local timetable (public/data) and the live Renfe GTFS-RT feeds (via rt.php).
 import { loadJson, saveJson } from './storage.ts';
-import type {
-  AlertFeed,
-  CrtmJson,
-  DaysFile,
-  RouteFile,
-  EmtJson,
-  StopFile,
-  RouteMap,
-  Stop,
-  TripUpdates,
+import {
+  assignDirections,
+  isBus,
+  stopDirections,
+  type AlertFeed,
+  type CrtmJson,
+  type CrtmRow,
+  type DaysFile,
+  type RouteFile,
+  type EmtJson,
+  type StopFile,
+  type RouteMap,
+  type Stop,
+  type TripUpdates,
 } from './gtfs.ts';
 
 const base = import.meta.env.BASE_URL;
@@ -131,6 +135,29 @@ export const fetchCrtm = (stopId: string) => {
   );
   return p;
 };
+
+// Live rows of a bus stop with the destination replaced by the timetable headsign of their
+// direction. Only routes with several directions at the stop need their route file (patterns)
+// and the stop names; on any failure the rows keep CRTM's text.
+export async function directCrtm(
+  rows: CrtmRow[],
+  file: StopFile | null,
+  stopId: string,
+): Promise<CrtmRow[]> {
+  if (!isBus(file)) return rows;
+  const ids = [...new Set(rows.map(r => r.routeId))];
+  const multi = ids.filter(id => stopDirections(file, id).length > 1);
+  try {
+    const [names, files] = await Promise.all([
+      multi.length ? loadStopNames() : new Map<string, string>(),
+      Promise.all(multi.map(loadRoute)),
+    ]);
+    const patterns = Object.fromEntries(multi.map((id, i) => [id, files[i].p]));
+    return assignDirections(rows, file, stopId, patterns, id => names.get(id));
+  } catch {
+    return rows;
+  }
+}
 
 // EMT arrivals (`emt_72` -> stop 72) through rt.php, which caches 30 s; same memo here. The last
 // copy per stop is kept for offline (evictable cache entries).

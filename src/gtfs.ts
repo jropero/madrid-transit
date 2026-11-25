@@ -425,7 +425,7 @@ type One<T> = T | T[];
 type CrtmLine = { codLine?: string; shortDescription?: string };
 type CrtmTime = {
   line?: CrtmLine;
-  destinationStop?: { name?: string };
+  destinationStop?: { name?: string; codStop?: string };
   time?: string;
   codIssue?: string;
 };
@@ -439,7 +439,9 @@ export type CrtmRow = {
   when: Date;
   routeId: string;
   line: string;
-  dest: string;
+  dest: string; // CRTM's destination text, or the timetable headsign once a direction is assigned
+  code?: string; // CRTM code of the destination stop (`8_16578`), when given
+  pi?: number; // route pattern of the assigned timetable direction (when it has just one)
   tram: boolean;
   metro: boolean;
   issue: string;
@@ -469,6 +471,7 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
       routeId,
       line: t.line?.shortDescription ?? routeId,
       dest: t.destinationStop?.name?.trim() ?? '',
+      code: t.destinationStop?.codStop?.trim() || undefined,
       tram: routeId.startsWith('10__'),
       metro: routeId.startsWith('4__'),
       issue: t.codIssue ?? '',
@@ -499,6 +502,7 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   color: routes[r.routeId]?.color ?? '#555555',
   text: routes[r.routeId]?.text ?? '#ffffff',
   dest: r.dest,
+  pi: r.pi,
   bus: true,
   tram: r.tram,
   urban: routes[r.routeId]?.urban,
@@ -509,13 +513,22 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   live: true,
 });
 
-// Live row count and latest live time per route, for the rows inside the window.
-function crtmSpans(rows: CrtmRow[]): Map<string, { k: number; last: number }> {
+// Replacement bucket of a live row: its route and, when its destination is the headsign of one of
+// the route's timetable directions at this stop, that direction (else '' = the whole route).
+const bucketOf = (r: CrtmRow, heads: Map<string, Set<string>>) =>
+  `${r.routeId}|${heads.get(r.routeId)?.has(r.dest) ? r.dest : ''}`;
+
+// Live row count and latest live time per bucket, for the rows inside the window.
+function crtmSpans(
+  rows: CrtmRow[],
+  heads: Map<string, Set<string>>,
+): Map<string, { k: number; last: number }> {
   const spans = new Map<string, { k: number; last: number }>();
   for (const r of rows) {
     const t = r.when.getTime();
-    const s = spans.get(r.routeId) ?? { k: 0, last: t };
-    spans.set(r.routeId, { k: s.k + 1, last: Math.max(s.last, t) });
+    const key = bucketOf(r, heads);
+    const s = spans.get(key) ?? { k: 0, last: t };
+    spans.set(key, { k: s.k + 1, last: Math.max(s.last, t) });
   }
   return spans;
 }
@@ -524,9 +537,10 @@ function crtmSpans(rows: CrtmRow[]): Map<string, { k: number; last: number }> {
 // times up to hh:mm:59.
 const CRTM_PRECISION_MS = 59_000;
 
-// Timetable rows of one covered route that its live rows replace: everything planned up to the
-// latest live time, and at least k rows (each live bus consumes one scheduled trip, so a late
-// bus whose slot is earlier than its live time, or an early one, still removes its own slot).
+// Timetable rows of one covered route (and direction) that its live rows replace: everything
+// planned up to the latest live time, and at least k rows (each live bus consumes one scheduled
+// trip, so a late bus whose slot is earlier than its live time, or an early one, still removes
+// its own slot).
 function replacedByLive(rows: Departure[], s: { k: number; last: number }): Departure[] {
   const sorted = [...rows].sort((a, b) => a.planned.getTime() - b.planned.getTime());
   const upToLast = sorted.filter(d => d.planned.getTime() <= s.last + CRTM_PRECISION_MS).length;
@@ -535,9 +549,11 @@ function replacedByLive(rows: Departure[], s: { k: number; last: number }): Depa
 
 // Merge rule: a route is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
 // covered route shows its live rows plus the timetable rows that no live row stands for (see
-// replacedByLive); uncovered routes (including routes CRTM lists only far in the future) keep
-// their whole timetable. There is deliberately no "timetable rows long before CRTM's first
-// time survive" rule: it showed a live and a scheduled row for the same bus.
+// replacedByLive); live rows whose `dest` is a timetable headsign of the route (see
+// assignDirections) consume only the rows of that direction. Uncovered routes (including routes
+// CRTM lists only far in the future) keep their whole timetable. There is deliberately no
+// "timetable rows long before CRTM's first time survive" rule: it showed a live and a scheduled
+// row for the same bus.
 export function mergeCrtm(
   planned: Departure[],
   rows: CrtmRow[] | null,
@@ -548,15 +564,19 @@ export function mergeCrtm(
   const from = now.getTime() - 60_000;
   const to = now.getTime() + HORIZON_MS;
   const inWindow = rows.filter(r => r.when.getTime() >= from && r.when.getTime() <= to);
-  const spans = crtmSpans(inWindow);
+  const heads = new Map<string, Set<string>>();
+  for (const d of planned)
+    heads.set(d.routeId, (heads.get(d.routeId) ?? new Set()).add(d.dest));
   const dropped = new Set<Departure>();
-  for (const [routeId, s] of spans) {
-    const own = planned.filter(d => d.routeId === routeId);
+  for (const [key, s] of crtmSpans(inWindow, heads)) {
+    const [routeId, head] = key.split('|');
+    const own = planned.filter(d => d.routeId === routeId && (!head || d.dest === head));
     for (const d of replacedByLive(own, s)) dropped.add(d);
   }
   const live = inWindow.map((r, i) => crtmDeparture(r, i, routes));
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
+
 console.assert(
   (() => {
     const now = new Date('2026-11-25T09:00:00Z');
@@ -1467,6 +1487,181 @@ console.assert(
     );
   })(),
   'nextStops offsets, pickPattern: destination match, longest fallback, none',
+);
+
+// ---------------------------------------------------------------- CRTM direction assignment
+
+// A timetable direction of a route at this stop: its headsign and the route patterns it uses.
+export type Direction = { head: string; pis: number[] };
+
+// Distinct directions (headsigns) of `routeId` in this stop's timetable file.
+export function stopDirections(file: BusFile, routeId: string): Direction[] {
+  const ri = file.r.indexOf(routeId);
+  const byHead = new Map<string, Set<number>>();
+  for (const [, , r, h, pi] of file.d) {
+    if (r !== ri) continue;
+    const pis = byHead.get(file.h[h]) ?? new Set<number>();
+    if (pi !== undefined) pis.add(pi);
+    byHead.set(file.h[h], pis);
+  }
+  return [...byHead].map(([head, pis]) => ({ head, pis: [...pis] }));
+}
+
+// Words that tell nothing about a destination ("VENUS NORTE" and "VENUS SUR" are one place).
+const GENERIC_WORDS = new Set(['del', 'las', 'los', 'norte', 'sur', 'este', 'oeste']);
+const nameWords = (s: string) =>
+  fold(s)
+    .split(/[^a-z0-9]+/)
+    .filter(w => w.length > 2 && !GENERIC_WORDS.has(w));
+const sharedWords = (a: string, b: string) => {
+  const y = nameWords(b);
+  return nameWords(a).filter(w => y.includes(w)).length;
+};
+
+// The direction with the strictly highest positive score, else undefined (tie or none).
+function uniqueBest(dirs: Direction[], score: (d: Direction) => number): Direction | undefined {
+  const scored = dirs.map(d => ({ d, s: score(d) })).sort((a, b) => b.s - a.s);
+  return scored[0].s > 0 && scored[0].s !== scored[1]?.s ? scored[0].d : undefined;
+}
+
+type DirCtx = {
+  row: CrtmRow;
+  stopId: string;
+  patterns: Pattern[];
+  nameOf: (id: string) => string | undefined;
+};
+
+// Is stop `id` the row's destination stop (CRTM code or name)?
+const isDest = (c: DirCtx, id: string) =>
+  (!!c.row.code && id === `par_${c.row.code}`) || sameName(c.nameOf(id) ?? '', c.row.dest);
+// 1 when some pattern of the direction passes the test on its stop ids (all, or after this stop).
+const anyPattern = (c: DirCtx, d: Direction, test: (p: Pattern) => boolean) =>
+  d.pis.some(pi => !!c.patterns[pi] && test(c.patterns[pi])) ? 1 : 0;
+
+// Rules in order: the destination is a direction's last stop; its headsign shares significant
+// words with the destination text; the destination is somewhere after this stop. (Names in the
+// tail come last: on a circular line both directions pass both ends.)
+const directionRules: ((c: DirCtx) => (d: Direction) => number)[] = [
+  c => d => anyPattern(c, d, p => isDest(c, p.at(-1)?.[0] ?? '')),
+  c => d => sharedWords(c.row.dest, d.head),
+  c => d =>
+    anyPattern(c, d, p => p.slice(stopIndex(p, c.stopId) + 1).some(([id]) => isDest(c, id))),
+];
+
+// Timetable direction a live row belongs to, or undefined when unknown or ambiguous. One
+// direction at the stop: that one.
+export function directionOf(c: DirCtx, dirs: Direction[]): Direction | undefined {
+  if (dirs.length < 2) return dirs[0];
+  for (const rule of directionRules) {
+    const d = uniqueBest(dirs, rule(c));
+    if (d) return d;
+  }
+  return undefined;
+}
+
+// Live rows with `dest` replaced by the timetable headsign of their direction, so they group
+// with (and replace) that direction's timetable rows. `patternsOf` and `dirsOf` are per route.
+export function assignDirections(
+  rows: CrtmRow[],
+  file: BusFile,
+  stopId: string,
+  patternsOf: Record<string, Pattern[]>,
+  nameOf: (id: string) => string | undefined,
+): CrtmRow[] {
+  const cache = new Map<string, Direction[]>();
+  const dirsOf = (id: string) => {
+    const dirs = cache.get(id) ?? stopDirections(file, id);
+    cache.set(id, dirs);
+    return dirs;
+  };
+  return rows.map(row => {
+    const patterns = patternsOf[row.routeId] ?? [];
+    const d = directionOf({ row, stopId, patterns, nameOf }, dirsOf(row.routeId));
+    return d ? { ...row, dest: d.head, pi: d.pis.length === 1 ? d.pis[0] : undefined } : row;
+  });
+}
+
+console.assert(
+  (() => {
+    const now = new Date('2026-11-25T09:00:00Z');
+    const names: Record<string, string> = {
+      a: 'ESTRELLA POLAR NORTE',
+      b: 'VENUS NORTE',
+      s: 'PARLA CENTRO',
+      c: 'VENUS SUR',
+      d: 'ESTRELLA POLAR SUR',
+      x: 'OTRA',
+    };
+    const nameOf = (id: string) => names[id];
+    // ML4-like circular line: names in the patterns differ from CRTM's destinations.
+    const p0: Pattern = [
+      ['s', 0],
+      ['b', 60],
+      ['a', 120],
+    ];
+    const p1: Pattern = [
+      ['s', 0],
+      ['d', 60],
+      ['c', 120],
+    ];
+    const file: BusFile = {
+      kind: 'bus',
+      r: ['L', 'M'],
+      h: ['ESTRELLA POLAR NORTE', 'VENUS SUR', 'ONLY'],
+      c: [],
+      d: [
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1],
+        [0, 0, 1, 2, 0],
+      ],
+    };
+    const row = (routeId: string, dest: string, iso: string): CrtmRow => ({
+      when: new Date(iso),
+      routeId,
+      line: routeId,
+      dest,
+      tram: false,
+      metro: false,
+      issue: '1',
+    });
+    const live = assignDirections(
+      [
+        row('L', 'VENUS NORTE', '2026-11-25T09:10:00Z'),
+        row('L', 'ESTRELLA POLAR SUR', '2026-11-25T09:11:00Z'),
+        row('M', 'WHATEVER', '2026-11-25T09:12:00Z'),
+        row('L', 'OTRA', '2026-11-25T09:13:00Z'),
+      ],
+      file,
+      's',
+      { L: [p0, p1] },
+      nameOf,
+    );
+    const dep = (head: string, iso: string): Departure => ({
+      ...testDep('L', iso),
+      dest: head,
+    });
+    const out = mergeCrtm(
+      [
+        dep('VENUS SUR', '2026-11-25T09:09:30Z'),
+        dep('VENUS SUR', '2026-11-25T09:30:00Z'),
+        dep('ESTRELLA POLAR NORTE', '2026-11-25T09:11:20Z'),
+        dep('ESTRELLA POLAR NORTE', '2026-11-25T09:40:00Z'),
+      ],
+      live.slice(0, 2),
+      {},
+      now,
+    );
+    const groups = out.map(d => `${d.dest}${d.live ? 'L' : ''}`).join('|');
+    return (
+      live[0].dest === 'VENUS SUR' &&
+      live[0].pi === 1 &&
+      live[1].dest === 'ESTRELLA POLAR NORTE' &&
+      live[2].dest === 'ONLY' &&
+      live[3].dest === 'OTRA' &&
+      groups === 'VENUS SURL|ESTRELLA POLAR NORTEL|VENUS SUR|ESTRELLA POLAR NORTE'
+    );
+  })(),
+  'assignDirections: ML4 words match, single direction takes headsign, unmatched keeps CRTM text, per-direction replacement',
 );
 
 // ---------------------------------------------------------------- Stop info and terminus text

@@ -9,6 +9,7 @@ import {
   fetchAlerts,
   fetchCrtm,
   fetchEmt,
+  directCrtm,
   fetchTripUpdates,
   isOffline,
   loadAllStops,
@@ -159,7 +160,7 @@ function crtmStatus(rows: CrtmRow[], offline: Date | null, at: Date, timetable: 
 
 // CRTM stop times for a bus or tram stop, every 60 s while `active`; failures and empty
 // answers leave the timetable in charge.
-function useCrtm(stopId: string, active: boolean, timetable: boolean) {
+function useCrtm(stopId: string, active: boolean, timetable: boolean, file: StopFile | null) {
   const [got, setGot] = useState<{ id: string; rows: CrtmRow[] } | null>(null);
   const [status, setStatus] = useState('Cargando…');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
@@ -169,7 +170,8 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean) {
     setLoading(true);
     try {
       const feed = await fetchCrtm(stopId);
-      const rows = parseCrtm(feed.data, new Date());
+      const parsed = parseCrtm(feed.data, new Date());
+      const rows = await directCrtm(parsed, file, stopId);
       setGot({ id: stopId, rows });
       setStatus(crtmStatus(rows, feed.offlineSince, new Date(), timetable));
     } catch (err) {
@@ -179,7 +181,7 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean) {
       setLoading(false);
       setLoadedAt(Date.now());
     }
-  }, [stopId, timetable]);
+  }, [stopId, timetable, file]);
 
   useEffect(() => {
     if (active) void load();
@@ -602,7 +604,7 @@ function Departures({
   const isMetro = isMetroId(selected.id);
   const useCrtmFeed = bus || isMetro;
   const renfe = useRealtime(active && !useCrtmFeed && !isEmt);
-  const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro);
+  const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro, stopDeps);
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const { deps, now } = useDepartureList(tt, {
