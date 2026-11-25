@@ -305,6 +305,7 @@ const modeLabel = (d: Departure) => {
   if (d.emt) return 'emt';
   if (d.metro) return 'metro';
   if (d.tram) return 'tranvía';
+  if (d.urban) return 'urbano';
   return d.bus ? 'bus' : 'cercanías';
 };
 
@@ -356,9 +357,9 @@ function LineGroup({
 
 const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía', m: 'metro', e: 'emt' };
 
-// "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains, metro and trams in bold.
+// "Parla · urbano · 16118 · Calle …" (town buses only) / "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains, metro and trams in bold.
 function StopCaption({ s }: { s: Stop }) {
-  const mode = STOP_MODE[s.k ?? ''] ?? 'tren';
+  const mode = s.u ? 'urbano' : (STOP_MODE[s.k ?? ''] ?? 'tren');
   const rest = [s.code, s.desc].filter(Boolean);
   return (
     <>

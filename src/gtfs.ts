@@ -12,6 +12,7 @@ export type Stop = {
   code?: string;
   desc?: string;
   town?: string; // municipality (CRTM open data), empty when unknown
+  u?: boolean; // served only by town buses ("autobuses urbanos")
 };
 // tram: Metro Ligero / Tranvía de Parla route (timetable only, same stop-file shape as buses).
 export type RouteInfo = {
@@ -21,6 +22,7 @@ export type RouteInfo = {
   name?: string;
   tram?: boolean;
   metro?: boolean;
+  urban?: boolean; // town bus (CRTM "Autobuses Urbanos")
 };
 export type RouteMap = Record<string, RouteInfo>;
 // updated: date of Renfe's zip (HTTP Last-Modified, else download date), yyyymmdd.
@@ -62,6 +64,7 @@ export type Departure = {
   dest: string; // Renfe: destination stop id; bus: headsign
   bus?: boolean; // timetable-only stop file (buses and light rail)
   tram?: boolean;
+  urban?: boolean; // town bus
   emt?: boolean; // EMT city bus (live arrivals only)
   metro?: boolean; // Metro de Madrid (live arrivals only)
   planned: Date;
@@ -258,6 +261,7 @@ function busDay(file: BusFile, day: string, routes: RouteMap, now: Date): Depart
       dest: file.h[hsi],
       bus: true,
       tram: r.tram,
+      urban: r.urban,
       pi,
       planned,
       expected: planned,
@@ -471,6 +475,7 @@ export function mergeCrtm(
       dest: r.dest,
       bus: true,
       tram: r.tram,
+      urban: routes[r.routeId]?.urban,
       metro: r.metro,
       planned: r.when,
       expected: r.when,

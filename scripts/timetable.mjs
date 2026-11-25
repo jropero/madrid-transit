@@ -49,6 +49,21 @@ const BUS = {
   layer: 'M8_Red',
   townCache: `${CACHE}crtm-stops.json`,
 };
+// Town buses ("Autobuses Urbanos" of the whole region): public ArcGIS item (no key, 8.8 MB). Same
+// GTFS shape and same stops table (par_8_<code>) as the interurban feed, so stops served by both
+// networks are merged; towns come from the same layer (and cache file) as the interurban buses.
+const URB = {
+  key: 'urb',
+  label: 'town bus',
+  k: 'b',
+  color: 'E60003',
+  auth: false,
+  urban: true,
+  url: 'https://www.arcgis.com/sharing/rest/content/items/357e63c2904f43aeb5d8a267a64346d8/data',
+  zip: `${CACHE}urb.zip`,
+  layer: 'M8_Red',
+  townCache: `${CACHE}crtm-stops.json`,
+};
 // Light rail: public ArcGIS item (no key), 417 KB.
 const ML = {
   key: 'ml',
@@ -419,8 +434,23 @@ async function buildRenfe() {
 
 // ---------------------------------------------------------------- Buses
 
+// Town of a town-bus route id (`9__1__106_`: line 1 of municipality 106, province 28 = Madrid).
+const urbanTown = (routeId, names) => {
+  const muni = routeId.split('__')[2]?.replace(/\D/g, '');
+  return muni ? (names[`28${muni.padStart(3, '0')}`] ?? '') : '';
+};
+console.assert(urbanTown('9__1__106_', { 28106: 'Parla' }) === 'Parla', 'urbanTown');
+console.assert(urbanTown('9__1__9_', { 28009: 'X' }) === 'X', 'urbanTown pads');
+
+// Town buses repeat short names across towns, so the long name carries the town.
+const urbanExtra = (r, names) => {
+  const town = urbanTown(r.route_id, names);
+  return { urban: true, name: town ? `${r.route_long_name} · ${town}` : r.route_long_name };
+};
+
 async function busRoutes(zip, feed) {
   const routes = {};
+  const names = feed.urban ? municipios() : {};
   for await (const r of rows(zip, 'routes.txt')) {
     routes[r.route_id] = {
       line: r.route_short_name,
@@ -428,6 +458,7 @@ async function busRoutes(zip, feed) {
       text: `#${r.route_text_color || 'FFFFFF'}`,
       name: r.route_long_name,
       ...(feed.k === 't' && { tram: true }),
+      ...(feed.urban && urbanExtra(r, names)),
     };
   }
   return routes;
@@ -504,6 +535,59 @@ function busFiles(trips, byTrip, cals, pats) {
   return files;
 }
 
+// Per-stop merge of two bus stop files (interurban + town): routes, headsigns and calendars are
+// unioned and the rows of `b` re-pointed at the merged indices. Pattern indices stay valid because
+// the two feeds never share a route id (patterns are per route).
+function mergeBusFiles(a, b) {
+  const keys = a.c.map(c => JSON.stringify(c));
+  const out = { kind: 'bus', r: [...a.r], h: [...a.h], c: [], d: [...a.d] };
+  const ri = b.r.map(v => indexOf(out.r, v));
+  const hi = b.h.map(v => indexOf(out.h, v));
+  const ci = b.c.map(c => indexOf(keys, JSON.stringify(c)));
+  for (const [secs, c, r, h, pi] of b.d) out.d.push([secs, ci[c], ri[r], hi[h], pi]);
+  out.c = keys.map(k => JSON.parse(k));
+  out.d.sort((x, y) => x[0] - y[0]);
+  return out;
+}
+console.assert(
+  (() => {
+    const cal1 = [127, 20261101, 20271231, [], []];
+    const cal2 = [1, 20261101, 20271231, [], [20261129]];
+    const a = { kind: 'bus', r: ['8__1'], h: ['A'], c: [cal1], d: [[100, 0, 0, 0, 2]] };
+    const b = {
+      kind: 'bus',
+      r: ['9__X', '8__1'],
+      h: ['B', 'A'],
+      c: [cal2, cal1],
+      d: [
+        [50, 0, 0, 0, 7],
+        [200, 1, 1, 1, 3],
+        [300, 0, 0, 1],
+      ],
+    };
+    const m = mergeBusFiles(a, b);
+    const row = i => JSON.stringify(m.d[i]);
+    return (
+      m.r.join() === '8__1,9__X' &&
+      m.h.join() === 'A,B' &&
+      m.c.length === 2 &&
+      JSON.stringify(m.c[0]) === JSON.stringify(cal1) &&
+      JSON.stringify(m.c[1]) === JSON.stringify(cal2) &&
+      row(0) === '[50,1,1,1,7]' &&
+      row(1) === '[100,0,0,0,2]' &&
+      row(2) === '[200,0,0,0,3]' &&
+      row(3) === '[300,1,1,0,null]'
+    );
+  })(),
+  'mergeBusFiles remaps routes, headsigns, calendars and keeps pattern indices',
+);
+
+// Stops of the town feed not in the interurban one, flagged `u` (served only by town buses).
+function urbanOnlyStops(bus, urb) {
+  const known = new Set((bus?.stops ?? []).map(s => s.id));
+  return urb.stops.filter(s => !known.has(s.id)).map(s => ({ ...s, u: true }));
+}
+
 async function busStops(zip, served, feed) {
   const stops = [];
   for await (const s of rows(zip, 'stops.txt')) {
@@ -535,6 +619,16 @@ async function buildCrtm(feed) {
   const files = busFiles(trips, byTrip, cals, pats);
   const stops = await busStops(zip, files, feed);
   return { routes, stops, files, pats, trips: trips.size };
+}
+
+// Never fails the build: a missing or broken town-bus feed only drops town-only stops.
+async function buildUrban() {
+  try {
+    return await buildCrtm(URB);
+  } catch (err) {
+    console.warn(`town bus step failed (${err.message}): skipping`);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------- Metro de Madrid
@@ -851,8 +945,9 @@ function assignRenfeTowns(renfeStops, busStops) {
   return renfeStops.filter(s => s.town).length;
 }
 
-async function assignTowns(renfeStops, bus, ml, metro) {
-  const t = { bus: 0, ml: 0, metro: 0, renfe: 0 };
+async function assignTowns(renfeStops, bus, ml, metro, urbOnly) {
+  const t = { bus: 0, ml: 0, metro: 0, renfe: 0, urb: 0 };
+  if (urbOnly.length) t.urb = assignCrtmTowns(urbOnly, await townsByCode(URB));
   if (metro) t.metro = assignCrtmTowns(metro.stops, await townsByCode(METRO));
   if (bus) t.bus = assignCrtmTowns(bus.stops, await townsByCode(BUS));
   if (ml) t.ml = assignCrtmTowns(ml.stops, await townsByCode(ML));
@@ -881,13 +976,16 @@ async function writeJson(name, value) {
   return sizes(text);
 }
 
+// The stop's CRTM file: interurban and town buses at one stop are merged into one.
+const crtmFile = (id, crtm) => {
+  const found = crtm.flatMap(f => f.files.get(id) ?? []);
+  return found.length ? found.reduce(mergeBusFiles) : null;
+};
+
 async function writeStopFiles(stops, renfe, crtm) {
   for (const s of stops) {
     if (s.k === 'e' || s.k === 'm') continue; // EMT and Metro stops have no file (live only)
-    const file =
-      crtm.find(f => f.files.has(s.id))?.files.get(s.id) ??
-      renfe.files.get(s.id) ??
-      renfe.empty;
+    const file = crtmFile(s.id, crtm) ?? renfe.files.get(s.id) ?? renfe.empty;
     await writeFile(`${OUT}stop/${s.id}.json`, JSON.stringify(file));
   }
 }
@@ -951,7 +1049,7 @@ const crtmLine = (name, f) =>
     ? `${name}: routes ${Object.keys(f.routes).length}, trips ${f.trips}, stops ${f.stops.length}`
     : `${name}: skipped`;
 
-function report(renfe, bus, ml, metro, emt, stops, sz) {
+function report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly) {
   const files = readdirSync(`${OUT}stop`).map(f => [f, statSync(`${OUT}stop/${f}`).size]);
   const total = files.reduce((n, [, s]) => n + s, 0);
   const [bigName, bigSize] = files.reduce((a, b) => (b[1] > a[1] ? b : a));
@@ -961,6 +1059,11 @@ function report(renfe, bus, ml, metro, emt, stops, sz) {
     `renfe: routes ${Object.keys(renfe.routes).length}, trips ${renfe.trips}, stops ${renfe.stops.length}, days ${from}..${to}`,
   );
   console.log(crtmLine('bus', bus));
+  console.log(crtmLine('town bus', urb));
+  if (urb)
+    console.log(
+      `town bus: ${urbOnly.length} town-only stops, ${urb.stops.length - urbOnly.length} merged`,
+    );
   console.log(crtmLine('light rail', ml));
   console.log(
     metro
@@ -989,15 +1092,18 @@ async function main() {
   const renfe = await buildRenfe();
   const bus = await buildCrtm(BUS);
   const ml = await buildCrtm(ML);
+  const urb = await buildUrban();
   const metro = await buildMetro();
   const emt = await buildEmt();
-  const t = await assignTowns(renfe.stops, bus, ml, metro);
+  const urbOnly = urb ? urbanOnlyStops(bus, urb) : [];
+  const t = await assignTowns(renfe.stops, bus, ml, metro, urbOnly);
   console.log(
-    `towns: bus ${t.bus}/${bus?.stops.length ?? 0}, light rail ${t.ml}/${ml?.stops.length ?? 0}, metro ${t.metro}/${metro?.stops.length ?? 0}, renfe ${t.renfe}/${renfe.stops.length} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
+    `towns: town-only bus ${t.urb}/${urbOnly.length}, bus ${t.bus}/${bus?.stops.length ?? 0}, light rail ${t.ml}/${ml?.stops.length ?? 0}, metro ${t.metro}/${metro?.stops.length ?? 0}, renfe ${t.renfe}/${renfe.stops.length} (nearest bus stop within ${NEAREST_TOWN_M} m)`,
   );
   const stops = [
     ...renfe.stops,
     ...(bus?.stops ?? []),
+    ...urbOnly,
     ...(ml?.stops ?? []),
     ...(metro?.stops ?? []),
     ...(emt?.stops ?? []),
@@ -1011,15 +1117,16 @@ async function main() {
   await writeJson('routes.json', {
     ...renfe.routes,
     ...bus?.routes,
+    ...urb?.routes,
     ...ml?.routes,
     ...metro?.routes,
     ...emt?.routes,
   });
   await writeJson('days.json', renfe.days);
-  await writeStopFiles(stops, renfe, [bus, ml].filter(Boolean));
-  await writeRouteFiles([renfe, bus, ml, metro, emt]);
+  await writeStopFiles(stops, renfe, [bus, urb, ml].filter(Boolean));
+  await writeRouteFiles([renfe, bus, urb, ml, metro, emt]);
   await writeAllowList(stops);
-  report(renfe, bus, ml, metro, emt, stops, sz);
+  report(renfe, bus, urb, ml, metro, emt, stops, sz, urbOnly);
 }
 
 await main();
