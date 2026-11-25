@@ -18,6 +18,7 @@ import {
   applyRealtime,
   daysUntil,
   emtDepartures,
+  fmtDist,
   ddmm,
   hhmm,
   isBus,
@@ -274,7 +275,12 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
       {d.cancelled ? (
         <span className="tag bad">cancelado</span>
       ) : (
-        <span className="left">{left === 0 ? 'ahora' : `${left} min`}</span>
+        <>
+          <span className="left">{left === 0 ? 'ahora' : `${left} min`}</span>
+          {d.distM !== undefined && left <= 5 && (
+            <span className="dist">{fmtDist(d.distM)}</span>
+          )}
+        </>
       )}
     </span>
   );

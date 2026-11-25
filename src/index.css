@@ -446,6 +446,11 @@ button:disabled {
   font-weight: 300;
 }
 
+.dep .dist {
+  color: var(--muted);
+  font-size: var(--t-small);
+}
+
 .route {
   list-style: none;
   margin: 0 0 8px 35px;

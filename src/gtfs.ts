@@ -59,6 +59,7 @@ export type Departure = {
   expected: Date;
   cancelled: boolean;
   live: boolean; // from CRTM times or a GTFS-RT trip update, not the static timetable
+  distM?: number; // EMT only: distance of the bus to the stop, metres
 };
 
 export type TripUpdates = {
@@ -552,10 +553,21 @@ console.assert(
 export type EmtJson = {
   code?: string;
   data?: {
-    Arrive?: { line?: string; destination?: string; estimateArrive?: string | number }[];
+    Arrive?: {
+      line?: string;
+      destination?: string;
+      estimateArrive?: string | number;
+      DistanceBus?: string | number;
+    }[];
   }[];
 };
-export type EmtRow = { when: Date; routeId: string; line: string; dest: string };
+export type EmtRow = {
+  when: Date;
+  routeId: string;
+  line: string;
+  dest: string;
+  distM?: number;
+};
 const NO_ESTIMATE = 999_999;
 
 // Live rows in time order; entries without a line or a usable estimate are dropped.
@@ -567,6 +579,7 @@ export function parseEmt(json: EmtJson | null, now: Date): EmtRow[] {
       line: a?.line?.trim() ?? '',
       dest: a?.destination?.trim() ?? '',
       s: Number(a?.estimateArrive),
+      m: Number(a?.DistanceBus ?? NaN),
     }))
     .filter(a => a.line && Number.isFinite(a.s) && a.s >= 0 && a.s < NO_ESTIMATE)
     .map(a => ({
@@ -574,6 +587,7 @@ export function parseEmt(json: EmtJson | null, now: Date): EmtRow[] {
       routeId: `emt_${a.line}`,
       line: a.line,
       dest: a.dest,
+      ...(Number.isFinite(a.m) && a.m >= 0 ? { distM: a.m } : {}),
     }))
     .sort((a, b) => a.when.getTime() - b.when.getTime());
 }
@@ -593,22 +607,26 @@ export const emtDepartures = (rows: EmtRow[], routes: RouteMap): Departure[] =>
     expected: r.when,
     cancelled: false,
     live: true,
+    distM: r.distM,
   }));
 console.assert(
   (() => {
     const now = new Date('2026-11-25T09:00:00Z');
-    const a = (line: string, destination: string, estimateArrive: string | number) => ({
-      line,
-      destination,
-      estimateArrive,
-    });
+    const a = (
+      line: string,
+      destination: string,
+      estimateArrive: string | number,
+      DistanceBus?: string | number,
+    ) => ({ line, destination, estimateArrive, DistanceBus });
     const rows = parseEmt(
       {
         code: '00',
         data: [
           {
             Arrive: [
-              a('27', 'PLAZA', '300'),
+              a('27', 'PLAZA', '300', 146),
+              a('28', 'PLAZA', '360', '1234'),
+              a('29', 'PLAZA', '420'),
               a('', 'X', 60),
               a('5', 'Y', 999999),
               a('1', 'Z', 'x'),
@@ -619,8 +637,11 @@ console.assert(
       now,
     );
     return (
-      rows.length === 1 &&
+      rows.length === 3 &&
       rows[0].routeId === 'emt_27' &&
+      rows[0].distM === 146 &&
+      rows[1].distM === 1234 &&
+      rows[2].distM === undefined &&
       rows[0].when.toISOString() === '2026-11-25T09:05:00.000Z' &&
       parseEmt({ code: '00', data: [{}] }, now).length === 0 &&
       parseEmt({ code: '80' }, now).length === 0 &&
@@ -629,7 +650,17 @@ console.assert(
       emtDepartures(rows, {})[0].live
     );
   })(),
-  'parseEmt: normal, no line, no estimate, malformed, empty and error responses',
+  'parseEmt: normal, DistanceBus number/string/missing, no line, no estimate, malformed, empty and error responses',
+);
+
+// "146 m", or "1,2 km" from 1000 m (es-ES, one decimal).
+export const fmtDist = (m: number) =>
+  m < 1000
+    ? `${Math.round(m)} m`
+    : `${(m / 1000).toLocaleString('es-ES', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km`;
+console.assert(
+  fmtDist(146) === '146 m' && fmtDist(1234) === '1,2 km',
+  'fmtDist: metres below 1000, km with a comma above',
 );
 
 // Departures still worth showing: not yet gone (30 s grace), within the horizon by plan.
