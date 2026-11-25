@@ -24,6 +24,34 @@ const getJson = async <T>(url: string): Promise<T> => {
   return (await res.json()) as T;
 };
 
+// Live feeds give up after 12 s (CRTM answers in 0.4-8 s, erratically). The abort reason is a
+// `TimeoutError`, which `isOffline` (TypeError only) does not mistake for a lost connection.
+const LIVE_TIMEOUT_MS = 12_000;
+export const isTimeout = (err: unknown) =>
+  err instanceof DOMException && err.name === 'TimeoutError';
+
+// `X-Data-Age` (rt.php): seconds since the cached upstream answer was fetched; absent = fresh.
+const dataAgeMs = (res: Response) => {
+  const secs = Number(res.headers.get('X-Data-Age'));
+  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : 0;
+};
+
+const getLive = async <T>(url: string): Promise<{ data: T; fetchedAt: number }> => {
+  const ctl = new AbortController();
+  const timer = setTimeout(
+    () => ctl.abort(new DOMException('no response', 'TimeoutError')),
+    LIVE_TIMEOUT_MS,
+  );
+  try {
+    const res = await fetch(url, { signal: ctl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
+    const fetchedAt = Date.now() - dataAgeMs(res);
+    return { data: (await res.json()) as T, fetchedAt };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 // Memoised; a failed load is forgotten so the next refresh retries.
 const memo = <T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) => {
   let p = cache.get(key);
@@ -89,7 +117,8 @@ const slimTrips = (f: TripUpdates): TripUpdates => ({
 
 export const isOffline = (err: unknown) => err instanceof TypeError;
 
-type Feed<T> = { data: T; offlineSince: Date | null };
+// fetchedAt: when the answer was fetched upstream (now minus X-Data-Age; the copy time offline).
+type Feed<T> = { data: T; offlineSince: Date | null; fetchedAt: number };
 
 // Online: fetch and remember. No network: the last stored copy (offlineSince = when it was fetched).
 async function fetchFeed<T>(
@@ -99,12 +128,14 @@ async function fetchFeed<T>(
 ): Promise<Feed<T>> {
   const key = `madrid-transit:cache:rt:${name}`;
   try {
-    const data = slim(await getJson<T>(`${base}rt.php?${query}`));
+    const live = await getLive<T>(`${base}rt.php?${query}`);
+    const data = slim(live.data);
     saveJson(key, { at: Date.now(), data });
-    return { data, offlineSince: null };
+    return { data, offlineSince: null, fetchedAt: live.fetchedAt };
   } catch (err) {
     const c = loadJson<{ at: number; data: T } | null>(key, null);
-    if (isOffline(err) && c) return { data: c.data, offlineSince: new Date(c.at) };
+    if (isOffline(err) && c)
+      return { data: c.data, offlineSince: new Date(c.at), fetchedAt: c.at };
     throw err;
   }
 }

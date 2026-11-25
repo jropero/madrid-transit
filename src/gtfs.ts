@@ -1401,6 +1401,53 @@ export const saveSaved = (stops: Saved[]) => saveJson(STOPS_KEY, stops);
 export const hhmm = (d: Date) =>
   d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: MADRID });
 
+// Status line of a live CRTM/EMT fetch: waiting (plain for 2 s, then counting), timed out, or
+// fresh with the age of the answer (omitted under 10 s).
+export type LiveStatus =
+  | { kind: 'waiting'; label: string; waitedMs: number }
+  | { kind: 'timeout'; label: string }
+  | { kind: 'fresh'; label: string; fetchedAt: number; now: number };
+
+const ageNote = (ms: number) => {
+  const secs = Math.floor(ms / 1000);
+  if (secs < 10) return '';
+  return secs < 60 ? ` (hace ${secs} s)` : ` (hace ${Math.floor(secs / 60)} min)`;
+};
+
+const waitingText = (label: string, waitedMs: number) =>
+  waitedMs < 2000
+    ? 'esperando datos en vivo…'
+    : `esperando a ${label} · ${Math.floor(waitedMs / 1000)} s`;
+
+export function liveStatusText(s: LiveStatus): string {
+  if (s.kind === 'waiting') return waitingText(s.label, s.waitedMs);
+  if (s.kind === 'timeout') return `${s.label} no responde · mostrando horario`;
+  const at = hhmm(new Date(s.fetchedAt));
+  return `en vivo · ${s.label} ${at}${ageNote(Math.max(0, s.now - s.fetchedAt))}`;
+}
+
+{
+  const t = Date.UTC(2026, 0, 15, 14, 44, 0); // 15:44 in Madrid
+  const fresh = (age: number) =>
+    liveStatusText({ kind: 'fresh', label: 'CRTM', fetchedAt: t, now: t + age });
+  console.assert(
+    liveStatusText({ kind: 'waiting', label: 'CRTM', waitedMs: 1500 }) ===
+      'esperando datos en vivo…',
+    'waiting under 2 s',
+  );
+  console.assert(
+    liveStatusText({ kind: 'waiting', label: 'CRTM', waitedMs: 5200 }) ===
+      'esperando a CRTM · 5 s',
+    'waiting 5 s',
+  );
+  console.assert(
+    liveStatusText({ kind: 'timeout', label: 'EMT' }) === 'EMT no responde · mostrando horario',
+    'timeout',
+  );
+  console.assert(fresh(3000) === 'en vivo · CRTM 15:44', 'fresh');
+  console.assert(fresh(40_000) === 'en vivo · CRTM 15:44 (hace 40 s)', '40 s old');
+}
+
 // "20261224" -> "24.12."
 export const ddmm = (yyyymmdd: string) => `${yyyymmdd.slice(6, 8)}.${yyyymmdd.slice(4, 6)}.`;
 console.assert(ddmm('20261224') === '24.12.', 'ddmm');
