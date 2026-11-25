@@ -26,6 +26,7 @@ import {
 import {
   applyRealtime,
   dedupeLd,
+  renfeArrivals,
   tileSize,
   compareLines,
   daysUntil,
@@ -56,6 +57,7 @@ import {
   type EmtRow,
   type StopFile,
   type Departure,
+  type RouteMap,
   type NearStop,
   type Saved,
   type Stop,
@@ -356,21 +358,37 @@ function useEmt(stopId: string, active: boolean) {
   };
 }
 
-const groupKey = (d: Departure) => `${d.line}|${d.dest}`;
+// What a group is named after: the destination, or the origin on the arrivals board.
+// Arrivals of one coupled train carry several origins (`origins`), shown joined with " · ".
+const originsOf = (d: Departure) => d.origins ?? [d.origin ?? d.dest];
+const endOf = (d: Departure, arrivals: boolean) => (arrivals ? originsOf(d).join('|') : d.dest);
+const endName = (d: Departure, arrivals: boolean, nameOf: (stop: string) => string) =>
+  arrivals
+    ? originsOf(d)
+        .map(o => short(nameOf(o)))
+        .join(' · ')
+    : nameOf(d.dest);
+const groupKey = (d: Departure, arrivals: boolean) =>
+  `${arrivals ? 'arr:' : ''}${d.line}|${endOf(d, arrivals)}`;
 
-// Lines in fixed natural order (line, then destination) so groups don't jump on refresh;
-// each group keeps its own departures in time order. Destination is the displayed name.
-function groupDepartures(deps: Departure[], nameOf: (dest: string) => string) {
+// Lines in fixed natural order (line, then destination or origin) so groups don't jump on
+// refresh; each group keeps its own departures in time order. The name is the displayed one.
+function groupDepartures(
+  deps: Departure[],
+  nameOf: (stop: string) => string,
+  arrivals = false,
+) {
   const groups = new Map<string, Departure[]>();
   for (const d of deps) {
-    const list = groups.get(groupKey(d)) ?? [];
+    const key = groupKey(d, arrivals);
+    const list = groups.get(key) ?? [];
     list.push(d);
-    groups.set(groupKey(d), list);
+    groups.set(key, list);
   }
   return [...groups.entries()].sort(([, a], [, b]) =>
     compareLines(
-      { line: a[0].line, dest: nameOf(a[0].dest) },
-      { line: b[0].line, dest: nameOf(b[0].dest) },
+      { line: a[0].line, dest: endName(a[0], arrivals, nameOf) },
+      { line: b[0].line, dest: endName(b[0], arrivals, nameOf) },
     ),
   );
 }
@@ -416,6 +434,7 @@ function LineGroup({
   lineKey,
   defaultOpen,
   destName,
+  from,
   stopId,
   hasAlert,
   now,
@@ -425,6 +444,7 @@ function LineGroup({
   lineKey: string;
   defaultOpen: boolean;
   destName: string;
+  from: boolean; // arrivals board: the name is the origin
   stopId: string;
   hasAlert: boolean;
   now: number;
@@ -451,6 +471,7 @@ function LineGroup({
         </span>
         <span className="deps">
           <span className="dest">
+            {from && 'desde '}
             {short(destName)}
             <AlertMark on={hasAlert} />
             {list.some(d => d.live) && <span className="live">en vivo</span>}
@@ -652,6 +673,7 @@ type Sources = {
   emt: EmtRow[] | null;
   metro: boolean;
   ld: boolean;
+  arrivals: string | null; // Renfe arrivals board: the stop id
 };
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
@@ -659,6 +681,10 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   // Metro: live times only, no timetable.
   if (src.metro) return mergeCrtm([], src.crtm, tt.routes, at);
   if (!src.list) return [];
+  if (src.arrivals !== null && !isBus(src.list)) {
+    const arr = renfeArrivals(src.list, tt.days, tt.routes, at, src.ld, src.arrivals);
+    return dedupeLd(applyRealtime(arr, src.trips), true);
+  }
   const planned = scheduled(src.list, tt.days, tt.routes, at, src.ld);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
   return isBus(src.list)
@@ -668,13 +694,16 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
 
 function useDepartureList(tt: Timetable | null, src: Sources) {
   const now = useNow();
-  const { list, trips, crtm, emt, metro, ld } = src;
+  const { list, trips, crtm, emt, metro, ld, arrivals } = src;
   const deps = useMemo(
     () =>
       tt
-        ? upcoming(departuresAt(tt, { list, trips, crtm, emt, metro, ld }, new Date(now)), now)
+        ? upcoming(
+            departuresAt(tt, { list, trips, crtm, emt, metro, ld, arrivals }, new Date(now)),
+            now,
+          )
         : [],
-    [tt, list, trips, crtm, emt, metro, ld, now],
+    [tt, list, trips, crtm, emt, metro, ld, arrivals, now],
   );
   return { deps, now };
 }
@@ -724,6 +753,98 @@ function stopCodeLabel(info: Stop | undefined, id: string): string {
 
 const INFO_PANEL = 'stop-info';
 
+type GroupList = [string, Departure[]][];
+
+// Line groups (Cercanías and every other mode first, then media/larga distancia under its own heading).
+function BoardGroups(p: {
+  groups: GroupList;
+  ldGroups: GroupList;
+  arrivals: boolean;
+  stopId: string;
+  openLine?: string;
+  destName: (id: string) => string;
+  board: ReturnType<typeof useAlertBoard>;
+  now: number;
+  onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
+}) {
+  return [...p.groups, ...p.ldGroups].map(([key, list], i) => (
+    <Fragment key={`${p.stopId}|${key}`}>
+      {p.ldGroups.length > 0 && i === p.groups.length && (
+        <h3 className="section-sub">media y larga distancia</h3>
+      )}
+      <LineGroup
+        list={list}
+        lineKey={key}
+        defaultOpen={!p.arrivals && p.openLine === key}
+        stopId={p.stopId}
+        destName={endName(list[0], p.arrivals, p.destName)}
+        from={p.arrivals}
+        hasAlert={p.board.marks(list[0].routeId, list[0].line)}
+        now={p.now}
+        onSelect={p.onSelect}
+      />
+    </Fragment>
+  ));
+}
+
+// The salidas/llegadas choice, kept while browsing; the switch only exists on Renfe stations
+// (stop file loaded, not a bus one).
+function useBoardMode(showSwitch: boolean, stopId: string) {
+  const [mode, setMode] = useState<BoardMode>('salidas');
+  const arrivals = showSwitch && mode === 'llegadas';
+  // The stop id when the arrivals board is on, else null (what `Sources.arrivals` wants).
+  return { mode, setMode, showSwitch, arrivals, arrivalsAt: arrivals ? stopId : null };
+}
+
+// Nothing in the next 2 hours: arrivals say so, departures also list the lines that serve the stop.
+function EmptyBoard(p: {
+  arrivals: boolean;
+  stopId: string;
+  routes?: RouteMap; // absent: the board is not empty (or not loaded)
+  now: number;
+}) {
+  if (!p.routes) return null;
+  if (p.arrivals) return <p className="status">sin llegadas en las próximas 2 horas</p>;
+  return (
+    <NoDepartures
+      stopId={p.stopId}
+      routes={p.routes}
+      now={p.now}
+      fallback="sin salidas en las próximas 2 horas"
+    />
+  );
+}
+
+const liveRows = (metro: boolean, crtm: CrtmRow[] | null, emt: EmtRow[] | null) =>
+  metro ? crtm : emt;
+const isEmpty = (tt: Timetable | null, hasData: boolean, groups: GroupList) =>
+  !!tt && hasData && groups.length === 0;
+
+const emptyRoutes = (empty: boolean, tt: Timetable | null) => (empty ? tt?.routes : undefined);
+
+type BoardMode = 'salidas' | 'llegadas';
+const BOARD_MODES: BoardMode[] = ['salidas', 'llegadas'];
+
+// Switch between a Renfe station's departures and arrivals.
+function BoardSwitch(p: { show: boolean; mode: BoardMode; onMode: (m: BoardMode) => void }) {
+  const { mode, onMode } = p;
+  if (!p.show) return null;
+  return (
+    <div className="board-mode" role="group" aria-label="Panel de salidas o llegadas">
+      {BOARD_MODES.map(m => (
+        <button
+          key={m}
+          className="btn tilt"
+          aria-pressed={mode === m}
+          onClick={() => onMode(m)}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -765,6 +886,11 @@ function Departures({
   const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro, stopDeps);
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
+  const renfeStop = !useCrtmFeed && !isEmt;
+  const { mode, setMode, showSwitch, arrivals, arrivalsAt } = useBoardMode(
+    renfeStop && !!stopDeps,
+    selected.id,
+  );
   const { deps, now } = useDepartureList(tt, {
     list: stopDeps,
     trips: renfe.trips,
@@ -772,8 +898,8 @@ function Departures({
     emt: emt.rows,
     metro: isMetro,
     ld,
+    arrivals: arrivalsAt,
   });
-  const renfeStop = !useCrtmFeed && !isEmt;
   const statusText = rt.statusText(deps.some(d => d.live));
   const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
 
@@ -787,7 +913,7 @@ function Departures({
   const board = useAlertBoard(alerts, routeIds, lines);
   const destName = (id: string) => stopById.get(id)?.name ?? id;
   // Cercanías and every other mode first, media/larga distancia in its own section after them.
-  const allGroups = groupDepartures(deps, destName);
+  const allGroups = groupDepartures(deps, destName, arrivals);
   const groups = allGroups.filter(([, l]) => !l[0].ld);
   const ldGroups = allGroups.filter(([, l]) => l[0].ld);
   // From a line's stop list: select the stop (not saved) and return the pane to the top.
@@ -823,8 +949,11 @@ function Departures({
     }
   }
 
-  const empty =
-    tt && hasStopData(stopDeps, isMetro ? crtm.rows : emt.rows) && allGroups.length === 0;
+  const empty = isEmpty(
+    tt,
+    hasStopData(stopDeps, liveRows(isMetro, crtm.rows, emt.rows)),
+    allGroups,
+  );
   return (
     <>
       {active && (
@@ -896,31 +1025,25 @@ function Departures({
 
       <Alerts board={board} />
 
-      {[...groups, ...ldGroups].map(([key, list], i) => (
-        <Fragment key={`${selected.id}|${key}`}>
-          {ldGroups.length > 0 && i === groups.length && (
-            <h3 className="section-sub">media y larga distancia</h3>
-          )}
-          <LineGroup
-            list={list}
-            lineKey={key}
-            defaultOpen={openLine === key}
-            stopId={selected.id}
-            destName={destName(list[0].dest)}
-            hasAlert={board.marks(list[0].routeId, list[0].line)}
-            now={now}
-            onSelect={showStop}
-          />
-        </Fragment>
-      ))}
-      {empty && (
-        <NoDepartures
-          stopId={selected.id}
-          routes={tt.routes}
-          now={now}
-          fallback="sin salidas en las próximas 2 horas"
-        />
-      )}
+      <BoardSwitch show={showSwitch} mode={mode} onMode={setMode} />
+
+      <BoardGroups
+        groups={groups}
+        ldGroups={ldGroups}
+        arrivals={arrivals}
+        stopId={selected.id}
+        openLine={openLine}
+        destName={destName}
+        board={board}
+        now={now}
+        onSelect={showStop}
+      />
+      <EmptyBoard
+        arrivals={arrivals}
+        stopId={selected.id}
+        routes={emptyRoutes(empty, tt)}
+        now={now}
+      />
 
       <p className="status">
         {statusLine([error, depsError, statusText, expiryNote(tt, new Date(now), !renfeStop)])}

@@ -42,12 +42,18 @@ export type DaysFile = {
 // pattern index into the route's route/<routeId>.json].
 // ld: media/larga distancia rows `[secs, calendar index, r index, d index, pattern index, full trip id]`
 // sorted by secs, with their own calendars (same shape as buses).
-export type LdRow = [number, number, number, number, number, string];
+// Both kinds of row end with the origin index (into `o`) when the build has it.
+export type LdRow = [number, number, number, number, number, string, number?];
+// Trips that end at the stop: [arrival secs, calendar index, r index, o index, pattern index, trip id].
+export type LdArrRow = [number, number, number, number, number, string];
 export type RenfeFile = {
   r: string[];
   d: string[];
-  s: Record<string, [number, string, number, number, number?][]>;
-  ld?: { c: BusCalendar[]; x: LdRow[] };
+  o?: string[]; // origin stop ids
+  s: Record<string, [number, string, number, number, number?, number?][]>;
+  // Cercanías trips that end here: [arrival secs, trip id minus prefix, r index, o index, pattern index].
+  a?: Record<string, [number, string, number, number, number?][]>;
+  ld?: { c: BusCalendar[]; x: LdRow[]; a?: LdArrRow[] };
 };
 // Bus stop file (timetable only): route ids (r), headsigns (h), calendars (c: weekday bitmask with
 // bit 0 = Sunday, start and end yyyymmdd, added and removed yyyymmdd dates) and rows
@@ -71,6 +77,8 @@ export type Departure = {
   color: string;
   text: string;
   dest: string; // Renfe: destination stop id; bus: headsign
+  origins?: string[]; // arrivals: every origin of the coupled trains merged into this row
+  origin?: string; // Renfe: the trip's first stop id (set on departure and arrival rows)
   bus?: boolean; // timetable-only stop file (buses and light rail)
   tram?: boolean;
   urban?: boolean; // town bus
@@ -219,6 +227,9 @@ console.assert(tripId('1027M', '!X1') === 'X1', 'tripId bang');
 const inWindow = (t: number, now: Date) =>
   t >= now.getTime() - 15 * 60_000 && t <= now.getTime() + HORIZON_MS;
 
+const originOf = (file: RenfeFile, oi?: number) =>
+  oi === undefined ? undefined : file.o?.[oi];
+
 // One service day's rows for a stop -> departures inside the window.
 function dayDepartures(
   file: RenfeFile,
@@ -228,7 +239,7 @@ function dayDepartures(
   serviceId: string,
 ): Departure[] {
   const out: Departure[] = [];
-  for (const [secs, suffix, ri, di, pi] of file.s[serviceId] ?? []) {
+  for (const [secs, suffix, ri, di, pi, oi] of file.s[serviceId] ?? []) {
     const planned = madridTime(day, secs);
     const routeId = file.r[ri];
     const r = routes[routeId];
@@ -240,6 +251,7 @@ function dayDepartures(
       color: r.color,
       text: r.text,
       dest: file.d[di],
+      origin: originOf(file, oi),
       pi,
       planned,
       expected: planned,
@@ -270,7 +282,7 @@ export function ldDay(
   const { from, to } = secsWindow(day, now);
   const active = ld.c.map(c => busActive(c, day));
   const out: Departure[] = [];
-  for (const [secs, ci, ri, di, pi, id] of ld.x) {
+  for (const [secs, ci, ri, di, pi, id, oi] of ld.x) {
     const routeId = file.r[ri];
     const r = routes[routeId];
     if (secs < from || secs > to || !active[ci] || !r) continue;
@@ -283,6 +295,7 @@ export function ldDay(
       color: r.color,
       text: r.text,
       dest: file.d[di],
+      origin: originOf(file, oi),
       ld: true,
       mode: r.name?.toLowerCase(),
       pi,
@@ -338,6 +351,161 @@ function renfeScheduled(
     ])
     .sort((a, b) => a.planned.getTime() - b.planned.getTime());
 }
+
+// One arrival row, whichever file it came from.
+type ArrRow = { secs: number; ri: number; dest: string; origin?: string; pi?: number };
+
+// Cercanías arrivals of one service day: passing trains (a departure row whose trip started
+// elsewhere; the arrival time is taken as the departure time) and trips that end here (exact
+// arrival time). Trips that start here are not arrivals.
+function dayArrivals(
+  file: RenfeFile,
+  day: string,
+  routes: RouteMap,
+  now: Date,
+  serviceId: string,
+  stopId: string,
+): Departure[] {
+  const passing = (file.s[serviceId] ?? []).map(
+    ([secs, suffix, ri, di, pi, oi]): [ArrRow, string] => [
+      { secs, ri, dest: file.d[di], origin: originOf(file, oi), pi },
+      suffix,
+    ],
+  );
+  const ending = (file.a?.[serviceId] ?? []).map(
+    ([secs, suffix, ri, oi, pi]): [ArrRow, string] => [
+      { secs, ri, dest: stopId, origin: originOf(file, oi), pi },
+      suffix,
+    ],
+  );
+  return [...passing, ...ending].flatMap(([row, suffix]) => {
+    const dep = arrivalDep(file, row, day, routes, now, stopId);
+    return dep ? [{ ...dep, tripId: tripId(serviceId, suffix) }] : [];
+  });
+}
+
+// A row -> departure-shaped arrival (tripId left to the caller); null when it starts here, has no
+// known origin, is not on a known route or is outside the window.
+function arrivalDep(
+  file: RenfeFile,
+  row: ArrRow,
+  day: string,
+  routes: RouteMap,
+  now: Date,
+  stopId: string,
+): Departure | null {
+  const routeId = file.r[row.ri];
+  const r = routes[routeId];
+  if (!r || !row.origin || row.origin === stopId) return null;
+  const planned = madridTime(day, row.secs);
+  if (!inWindow(planned.getTime(), now)) return null;
+  return {
+    tripId: '',
+    routeId,
+    line: r.line,
+    color: r.color,
+    text: r.text,
+    dest: row.dest,
+    origin: row.origin,
+    pi: row.pi,
+    planned,
+    expected: planned,
+    cancelled: false,
+    live: false,
+  };
+}
+
+// Media/larga distancia arrivals of one service day: passing rows (origin elsewhere) and the
+// trips that end here.
+function ldArrivals(
+  ld: NonNullable<RenfeFile['ld']>,
+  file: RenfeFile,
+  day: string,
+  routes: RouteMap,
+  now: Date,
+  stopId: string,
+): Departure[] {
+  const { from, to } = secsWindow(day, now);
+  const active = ld.c.map(c => busActive(c, day));
+  const passing = ld.x.map(([secs, ci, ri, di, pi, id, oi]): [ArrRow, number, string] => [
+    { secs, ri, dest: file.d[di], origin: originOf(file, oi), pi },
+    ci,
+    id,
+  ]);
+  const ending = (ld.a ?? []).map(([secs, ci, ri, oi, pi, id]): [ArrRow, number, string] => [
+    { secs, ri, dest: stopId, origin: originOf(file, oi), pi },
+    ci,
+    id,
+  ]);
+  return [...passing, ...ending].flatMap(([row, ci, id]) => {
+    if (row.secs < from || row.secs > to || !active[ci]) return [];
+    const dep = arrivalDep(file, row, day, routes, now, stopId);
+    const r = routes[file.r[row.ri]];
+    return dep ? [{ ...dep, tripId: id, ld: true, mode: r.name?.toLowerCase() }] : [];
+  });
+}
+
+// Renfe arrivals within [now - 15 min, now + 2 h]: same days and window as `renfeScheduled`.
+// `dest` is the trip's destination (this stop for trips that end here), `origin` its first stop.
+export function renfeArrivals(
+  file: RenfeFile,
+  days: DaysFile,
+  routes: RouteMap,
+  now: Date,
+  withLd: boolean,
+  stopId: string,
+): Departure[] {
+  const today = madridDate(now);
+  const ld = withLd ? file.ld : undefined;
+  return [shiftDay(today, -1), today]
+    .flatMap(day => [
+      ...(days.days[day] ?? []).flatMap(sid =>
+        dayArrivals(file, day, routes, now, sid, stopId),
+      ),
+      ...(ld ? ldArrivals(ld, file, day, routes, now, stopId) : []),
+    ])
+    .sort((a, b) => a.planned.getTime() - b.planned.getTime());
+}
+console.assert(
+  (() => {
+    const routes: RouteMap = {
+      R: { line: 'C1', color: '#000', text: '#fff' },
+      L: { line: 'AVE', color: '#000', text: '#fff', name: 'AVE', ld: true },
+    };
+    const file: RenfeFile = {
+      r: ['R', 'L'],
+      d: ['Z', 'HERE'],
+      o: ['A', 'HERE'],
+      // 10:00 passes (from A), 10:10 starts here (excluded).
+      s: {
+        S: [
+          [36000, 'p1', 0, 0, 0, 0],
+          [36600, 'h1', 0, 0, 0, 1],
+        ],
+      },
+      a: { S: [[37200, 't1', 0, 0, 1]] }, // 10:20 ends here
+      ld: {
+        c: [[0b1111111, 20260101, 20261231, [], []]],
+        x: [[38400, 0, 1, 0, 0, 'LP', 0]], // 10:40 passing
+        a: [[39000, 0, 1, 0, 0, 'LT']], // 10:50 ends here
+      },
+    };
+    const days: DaysFile = { from: '20260101', to: '20261231', days: { '20261125': ['S'] } };
+    const now = new Date('2026-11-25T08:30:00Z'); // 09:30 Madrid
+    const out = renfeArrivals(file, days, routes, now, true, 'HERE');
+    const ids = out.map(d => d.tripId).join();
+    const term = out.find(d => d.tripId === 'St1');
+    return (
+      ids === 'Sp1,St1,LP,LT' &&
+      term?.dest === 'HERE' &&
+      term.origin === 'A' &&
+      out[0].dest === 'Z' &&
+      out[3].ld === true &&
+      renfeArrivals(file, days, routes, now, false, 'HERE').length === 2
+    );
+  })(),
+  'renfeArrivals: passing and terminus rows in, rows starting here out',
+);
 
 // Does a bus calendar run on a service day (yyyymmdd)? Removed dates win over added ones, which
 // win over the weekly pattern.
@@ -523,15 +691,31 @@ console.assert(
 // Renfe lists one physical train under several trip ids (variants, or two products at once).
 // Among LD departures keep one per planned time + destination: the live one if any, else the
 // first in current order. Other departures are untouched.
-export function dedupeLd(deps: Departure[]): Departure[] {
+// `arrivals`: the kept row also lists every distinct origin of the rows it stands for (`origins`,
+// in current order), since coupled twins share a destination but not an origin.
+const ldKey = (d: Departure) => `${d.planned.getTime()}|${d.dest}`;
+
+// Distinct origins per planned time + destination, in current order.
+function originsByKey(deps: Departure[]) {
+  const origins = new Map<string, string[]>();
+  for (const d of deps) {
+    const list = origins.get(ldKey(d)) ?? [];
+    if (d.origin && !list.includes(d.origin)) list.push(d.origin);
+    origins.set(ldKey(d), list);
+  }
+  return origins;
+}
+
+export function dedupeLd(deps: Departure[], arrivals = false): Departure[] {
   const best = new Map<string, Departure>();
   for (const d of deps) {
-    if (!d.ld) continue;
-    const k = `${d.planned.getTime()}|${d.dest}`;
-    const cur = best.get(k);
-    if (!cur || (d.live && !cur.live)) best.set(k, d);
+    const cur = best.get(ldKey(d));
+    if (d.ld && (!cur || (d.live && !cur.live))) best.set(ldKey(d), d);
   }
-  return deps.filter(d => !d.ld || best.get(`${d.planned.getTime()}|${d.dest}`) === d);
+  const origins = originsByKey(deps.filter(d => d.ld));
+  return deps
+    .filter(d => !d.ld || best.get(ldKey(d)) === d)
+    .map(d => (arrivals && d.ld ? { ...d, origins: origins.get(ldKey(d)) } : d));
 }
 console.assert(
   (() => {
@@ -551,7 +735,22 @@ console.assert(
     });
     const other = mk('Z', false, new Date('2026-11-25T20:35:00Z'));
     const out = dedupeLd([mk('002951', false), mk('002952', true), mk('37095', false), other]);
-    return out.length === 2 && out[0].tripId === '002952' && out[1] === other;
+    const arr = dedupeLd(
+      [
+        { ...mk('A1', false), origin: 'X' },
+        { ...mk('A2', true), origin: 'Y' },
+        { ...mk('A3', false), origin: 'X' },
+      ],
+      true,
+    );
+    return (
+      out.length === 2 &&
+      out[0].tripId === '002952' &&
+      out[1] === other &&
+      arr.length === 1 &&
+      arr[0].tripId === 'A2' &&
+      arr[0].origins?.join() === 'X,Y'
+    );
   })(),
   'dedupeLd keeps the live row and distinct times',
 );

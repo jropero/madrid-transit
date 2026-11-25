@@ -338,14 +338,31 @@ function* tripCalls(byTrip, patOf) {
   }
 }
 
+// The terminus of each trip with 2+ calls: { tripId, list, arr, stopId, pi }, `arr` being the
+// arrival at the last stop (row element 3: arrival_time, falling back to departure_time).
+// Rows must already be sorted (tripCalls does it), so run this after tripCalls.
+function* tripEnds(byTrip, patOf) {
+  for (const [tripId, list] of byTrip) {
+    if (list.length < 2) continue;
+    const [, , stopId, arr] = list.at(-1);
+    yield { tripId, list, arr, stopId, pi: patOf(tripId, list) };
+  }
+}
+
 async function loadByTrip(zip, wanted) {
-  const byTrip = new Map(); // tripId -> [[seq, depSecs, stopId]]
+  const byTrip = new Map(); // tripId -> [[seq, depSecs, stopId, arrSecs]]
   const stopIds = new Map(); // intern stop ids: 1.3M rows share ~9k strings
   for await (const s of rows(zip, 'stop_times.txt')) {
     if (!wanted.has(s.trip_id)) continue;
     const list = byTrip.get(s.trip_id) ?? [];
     const stopId = stopIds.get(s.stop_id) ?? stopIds.set(s.stop_id, s.stop_id).get(s.stop_id);
-    list.push([Number(s.stop_sequence), toSecs(s.departure_time || s.arrival_time), stopId]);
+    const dep = toSecs(s.departure_time || s.arrival_time);
+    list.push([
+      Number(s.stop_sequence),
+      dep,
+      stopId,
+      toSecs(s.arrival_time || s.departure_time),
+    ]);
     byTrip.set(s.trip_id, list);
   }
   return byTrip;
@@ -400,22 +417,43 @@ async function renfeDays(zip, usedServices) {
   return { days, from: keys[0], to: keys.at(-1) };
 }
 
-// Per stop, compact: { r: routeIds, d: destStopIds, s: { serviceId: [[secs, tripSuffix, ri, di, pi]] } }
-// (pi = index into the route's patterns in route/<routeId>.json).
+// Per stop, compact: { r: routeIds, d: destStopIds, o: originStopIds,
+//   s: { serviceId: [[secs, tripSuffix, ri, di, pi, oi]] },
+//   a: { serviceId: [[arrSecs, tripSuffix, ri, oi, pi]] } }
+// (pi = index into the route's patterns in route/<routeId>.json). `s` rows are departures, `a`
+// rows are trips that END at the stop (arrival time, origin), each sorted by time.
 // The trip id is stored without its service-id prefix (the client re-adds it).
+const newRenfeFile = () => ({ r: [], d: [], o: [], s: {}, a: {} });
+const tripSuffix = (tripId, serviceId) =>
+  tripId.startsWith(serviceId) ? tripId.slice(serviceId.length) : `!${tripId}`;
+
 function renfeFiles(trips, byTrip, pats) {
   const files = new Map();
   const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
+  const fileOf = id => files.get(id) ?? files.set(id, newRenfeFile()).get(id);
   for (const { tripId, list, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
     const { routeId, serviceId } = trips.get(tripId);
-    const suffix = tripId.startsWith(serviceId) ? tripId.slice(serviceId.length) : `!${tripId}`;
-    const f = files.get(stopId) ?? { r: [], d: [], s: {} };
-    const row = [secs, suffix, indexOf(f.r, routeId), indexOf(f.d, list.at(-1)[2]), pi];
+    const f = fileOf(stopId);
+    const [di, oi] = [indexOf(f.d, list.at(-1)[2]), indexOf(f.o, list[0][2])];
+    const row = [secs, tripSuffix(tripId, serviceId), indexOf(f.r, routeId), di, pi, oi];
     (f.s[serviceId] ??= []).push(row);
-    files.set(stopId, f);
+  }
+  for (const { tripId, list, arr, stopId, pi } of tripEnds(byTrip, patOf)) {
+    const { routeId, serviceId } = trips.get(tripId);
+    const f = fileOf(stopId);
+    const row = [
+      arr,
+      tripSuffix(tripId, serviceId),
+      indexOf(f.r, routeId),
+      indexOf(f.o, list[0][2]),
+      pi,
+    ];
+    (f.a[serviceId] ??= []).push(row);
   }
   for (const f of files.values()) {
-    for (const list of Object.values(f.s)) list.sort((a, b) => a[0] - b[0]);
+    for (const list of [...Object.values(f.s), ...Object.values(f.a)]) {
+      list.sort((a, b) => a[0] - b[0]);
+    }
   }
   return files;
 }
@@ -452,7 +490,7 @@ async function buildRenfe() {
   // Renfe is the core data: an empty result fails the build (buses, light rail and towns only warn).
   if (!trips.size || !days.to) throw new Error('Renfe feed has no Madrid trips or days');
   // An empty file for terminus-only stops, so the client never hits a 404.
-  const empty = { r: [], d: [], s: {} };
+  const empty = newRenfeFile();
   days.updated = renfeUpdated();
   return { routes, stops, days, files, empty, pats, trips: trips.size };
 }
@@ -482,22 +520,33 @@ async function ldTrips(zip, routes, madrid) {
   return { trips: new Map([...all].filter(([id]) => byTrip.has(id))), byTrip };
 }
 
-// Per stop: { c: [calendars], x: [[secs, ci, ri, di, pi, tripId]], r, d } (r/d are local until
-// mergeLd points them at the Cercanías file's arrays).
+// Per stop: { c: [calendars], x: [[secs, ci, ri, di, pi, tripId, oi]],
+//   a: [[arrSecs, ci, ri, oi, pi, tripId]], r, d, o } (r/d/o are local until mergeLd points them
+// at the Cercanías file's arrays). `a` rows are trips that END at the stop.
 function ldFiles(trips, byTrip, cals, pats) {
   const files = new Map();
   const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
   const calKey = calKeys(cals);
+  const fileOf = id =>
+    files.get(id) ??
+    files.set(id, { r: [], d: [], o: [], c: [], x: [], a: [], keys: [] }).get(id);
   for (const { tripId, list, secs, stopId, pi } of tripCalls(byTrip, patOf)) {
     const { routeId, serviceId } = trips.get(tripId);
-    const f = files.get(stopId) ?? { r: [], d: [], c: [], x: [], keys: [] };
+    const f = fileOf(stopId);
     const ci = calIndex(f, calKey, serviceId);
-    f.x.push([secs, ci, indexOf(f.r, routeId), indexOf(f.d, list.at(-1)[2]), pi, tripId]);
-    files.set(stopId, f);
+    const [di, oi] = [indexOf(f.d, list.at(-1)[2]), indexOf(f.o, list[0][2])];
+    f.x.push([secs, ci, indexOf(f.r, routeId), di, pi, tripId, oi]);
+  }
+  for (const { tripId, list, arr, stopId, pi } of tripEnds(byTrip, patOf)) {
+    const { routeId, serviceId } = trips.get(tripId);
+    const f = fileOf(stopId);
+    const ci = calIndex(f, calKey, serviceId);
+    f.a.push([arr, ci, indexOf(f.r, routeId), indexOf(f.o, list[0][2]), pi, tripId]);
   }
   for (const f of files.values()) {
     delete f.keys;
     f.x.sort((a, b) => a[0] - b[0]);
+    f.a.sort((a, b) => a[0] - b[0]);
   }
   return files;
 }
@@ -532,35 +581,65 @@ async function buildLd(renfe) {
   }
 }
 
-// Cercanías file + LD rows: { r, d, s, ld: { c, x } } with the LD rows re-pointed at the
-// merged r (route ids) and d (destination stop ids).
+// Cercanías file + LD rows: { r, d, o, s, a, ld: { c, x, a } } with the LD rows re-pointed at the
+// merged r (route ids), d (destination stop ids) and o (origin stop ids).
 function mergeLd(base, ldf) {
   if (!ldf) return base;
   const r = [...base.r];
   const d = [...base.d];
   const ri = ldf.r.map(v => indexOf(r, v));
   const di = ldf.d.map(v => indexOf(d, v));
-  const x = ldf.x.map(([secs, c, ra, da, pi, id]) => [secs, c, ri[ra], di[da], pi, id]);
-  return { r, d, s: base.s, ld: { c: ldf.c, x } };
+  const o = [...base.o];
+  const oi = ldf.o.map(v => indexOf(o, v));
+  const x = ldf.x.map(([secs, c, ra, da, pi, id, oa]) => [
+    secs,
+    c,
+    ri[ra],
+    di[da],
+    pi,
+    id,
+    oi[oa],
+  ]);
+  const a = ldf.a.map(([secs, c, ra, oa, pi, id]) => [secs, c, ri[ra], oi[oa], pi, id]);
+  return { r, d, o, s: base.s, a: base.a, ld: { c: ldf.c, x, a } };
 }
 console.assert(
   (() => {
-    const base = { r: ['10T1'], d: ['9'], s: {} };
+    const base = { r: ['10T1'], d: ['9'], o: ['7'], s: {}, a: {} };
     const ldf = {
       r: ['LD1'],
       d: ['8', '9'],
+      o: ['6', '7'],
       c: [[127, 1, 2, [], []]],
-      x: [[5, 0, 0, 1, 3, 'T']],
+      x: [[5, 0, 0, 1, 3, 'T', 1]],
+      a: [[9, 0, 0, 0, 3, 'T']],
     };
     const m = mergeLd(base, ldf);
     return (
       m.r.join() === '10T1,LD1' &&
       m.d.join() === '9,8' &&
-      JSON.stringify(m.ld.x[0]) === '[5,0,1,0,3,"T"]' &&
+      m.o.join() === '7,6' &&
+      JSON.stringify(m.ld.x[0]) === '[5,0,1,0,3,"T",0]' &&
+      JSON.stringify(m.ld.a[0]) === '[9,0,1,1,3,"T"]' &&
       mergeLd(base, undefined) === base
     );
   })(),
-  'mergeLd re-points LD rows at the merged route and destination arrays',
+  'mergeLd re-points LD rows at the merged route, destination and origin arrays',
+);
+console.assert(
+  (() => {
+    const trip = [
+      [1, 100, 'a', 100],
+      [2, 200, 'b', 190],
+    ];
+    const byTrip = new Map([
+      ['t', trip],
+      ['u', [[1, 5, 'z', 5]]],
+    ]);
+    const ends = [...tripEnds(byTrip, () => 0)];
+    return ends.length === 1 && ends[0].stopId === 'b' && ends[0].arr === 190;
+  })(),
+  'tripEnds yields the arrival at the last stop of trips with 2+ calls',
 );
 
 // ---------------------------------------------------------------- Buses
