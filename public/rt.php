@@ -2,7 +2,7 @@
 // Whitelist proxy for upstreams that send no CORS headers; no other URL is reachable.
 //   ?f=trip_updates|alerts  Renfe GTFS-RT JSON, cached 15 s in the system temp dir.
 //   ?f=crtm&stop=8_16578    CRTM stop times (undocumented website endpoint, may change or
-//                           break), cached 60 s per stop. `stop` must match ^(8|10)_\d{1,6}$.
+//                           break), cached 60 s per stop. `stop` must match ^(4|6|8|10)_\d{1,6}$.
 //   ?f=emt&stop=72          EMT Madrid MobilityLabs bus arrivals (needs ../../emt.json, outside the
 //                           webroot, written by the deploy workflow), cached 30 s per stop. `stop`
 //                           must match ^\d{1,6}$. The credentials and the access token are never
@@ -215,7 +215,7 @@ if ($f === 'emt') {
 } elseif ($f === 'crtm') {
     $stop = $_GET['stop'] ?? '';
     // \z (not $) so a trailing newline cannot slip through.
-    if (!is_string($stop) || !preg_match('/^(8|10)_\d{1,6}\z/', $stop)) {
+    if (!is_string($stop) || !preg_match('/^(4|6|8|10)_\d{1,6}\z/', $stop)) {
         fail(400, 'bad stop');
     }
     $url = 'https://www.crtm.es/widgets/api/GetStopsTimes.php?codStop=' . $stop . '&type=1&orderBy=2&stopTimesByIti=3';

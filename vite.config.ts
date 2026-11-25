@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 // The validated `stop` of a /m/rt.php?f=crtm request (same pattern as rt.php), else ''.
 const crtmStop = (path: string) => {
   const stop = new URL(path, 'http://x').searchParams.get('stop') ?? '';
-  return /^(8|10)_\d{1,6}$/.test(stop) ? stop : '';
+  return /^(4|6|8|10)_\d{1,6}$/.test(stop) ? stop : '';
 };
 
 // The validated `stop` of a /m/rt.php?f=emt request (same pattern as rt.php), else ''.

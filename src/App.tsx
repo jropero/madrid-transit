@@ -65,13 +65,15 @@ function useTimetable() {
 
 // The selected stop's scheduled departures (a local file; none for EMT stops).
 const isEmtId = (id: string) => id.startsWith('emt_');
+// Metro stations (`par_4_<n>`) have live times only, through the CRTM widget (`4_<n>`).
+const isMetroId = (id: string) => id.startsWith('par_4_');
 
 function useStopDeps(id: string) {
   const [deps, setDeps] = useState<{ id: string; list: StopFile } | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
     setError('');
-    if (isEmtId(id)) return; // EMT stops have no timetable file (live only)
+    if (isEmtId(id) || isMetroId(id)) return; // EMT and Metro have no timetable file (live only)
     loadStopDeps(id).then(
       list => setDeps({ id, list }),
       err => setError(String(err)),
@@ -141,15 +143,19 @@ function useRealtime(active: boolean) {
   return { ...rt, status, setStatus, loadedAt, loading, load };
 }
 
-// "en vivo · CRTM 10:05" / "sin conexión · CRTM 10:05" (copy from that time) / "solo horario".
-function crtmStatus(rows: CrtmRow[], offline: Date | null, at: Date) {
-  if (!rows.length) return offline ? 'sin conexión · solo horario' : 'solo horario';
+// "en vivo · CRTM 10:05" / "sin conexión · CRTM 10:05" (copy from that time) / "solo horario"
+// (Metro has no timetable: "sin datos en vivo").
+function crtmStatus(rows: CrtmRow[], offline: Date | null, at: Date, timetable: boolean) {
+  if (!rows.length) {
+    const none = timetable ? 'solo horario' : 'sin datos en vivo';
+    return offline ? `sin conexión · ${none}` : none;
+  }
   return offline ? `sin conexión · CRTM ${hhmm(offline)}` : `en vivo · CRTM ${hhmm(at)}`;
 }
 
 // CRTM stop times for a bus or tram stop, every 60 s while `active`; failures and empty
 // answers leave the timetable in charge.
-function useCrtm(stopId: string, active: boolean) {
+function useCrtm(stopId: string, active: boolean, timetable: boolean) {
   const [got, setGot] = useState<{ id: string; rows: CrtmRow[] } | null>(null);
   const [status, setStatus] = useState('Cargando…');
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
@@ -161,15 +167,15 @@ function useCrtm(stopId: string, active: boolean) {
       const feed = await fetchCrtm(stopId);
       const rows = parseCrtm(feed.data, new Date());
       setGot({ id: stopId, rows });
-      setStatus(crtmStatus(rows, feed.offlineSince, new Date()));
+      setStatus(crtmStatus(rows, feed.offlineSince, new Date(), timetable));
     } catch (err) {
       setGot({ id: stopId, rows: [] });
-      setStatus(isOffline(err) ? 'sin conexión · solo horario' : 'solo horario');
+      setStatus(crtmStatus([], isOffline(err) ? new Date() : null, new Date(), timetable));
     } finally {
       setLoading(false);
       setLoadedAt(Date.now());
     }
-  }, [stopId]);
+  }, [stopId, timetable]);
 
   useEffect(() => {
     if (active) void load();
@@ -291,6 +297,7 @@ const MAX_PER_GROUP = 4;
 // Tile caption: timetable-only departures are 'tranvía' (light rail) or 'bus'.
 const modeLabel = (d: Departure) => {
   if (d.emt) return 'emt';
+  if (d.metro) return 'metro';
   if (d.tram) return 'tranvía';
   return d.bus ? 'bus' : 'cercanías';
 };
@@ -328,9 +335,9 @@ function LineGroup({
   );
 }
 
-const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía', e: 'emt' };
+const STOP_MODE: Record<string, string> = { b: 'bus', t: 'tranvía', m: 'metro', e: 'emt' };
 
-// "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains and trams in bold.
+// "Parla · tren · bold" / "Parla · bus · 16578 · Calle Río Tajo 7": trains, metro and trams in bold.
 function StopCaption({ s }: { s: Stop }) {
   const mode = STOP_MODE[s.k ?? ''] ?? 'tren';
   const rest = [s.code, s.desc].filter(Boolean);
@@ -462,10 +469,13 @@ type Sources = {
   trips: TripUpdates | null;
   crtm: CrtmRow[] | null;
   emt: EmtRow[] | null;
+  metro: boolean;
 };
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   if (src.emt) return emtDepartures(src.emt, tt.routes);
+  // Metro: live times only, no timetable.
+  if (src.metro) return mergeCrtm([], src.crtm, tt.routes, at);
   if (!src.list) return [];
   const planned = scheduled(src.list, tt.days, tt.routes, at);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
@@ -476,27 +486,52 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
 
 function useDepartureList(tt: Timetable | null, src: Sources) {
   const now = useNow();
-  const { list, trips, crtm, emt } = src;
+  const { list, trips, crtm, emt, metro } = src;
   const deps = useMemo(
     () =>
-      tt ? upcoming(departuresAt(tt, { list, trips, crtm, emt }, new Date(now)), now) : [],
-    [tt, list, trips, crtm, emt, now],
+      tt
+        ? upcoming(departuresAt(tt, { list, trips, crtm, emt, metro }, new Date(now)), now)
+        : [],
+    [tt, list, trips, crtm, emt, metro, now],
   );
   return { deps, now };
 }
 
-const pickFeed = <A, B, C>(isEmt: boolean, bus: boolean, f: { renfe: A; crtm: B; emt: C }) => {
-  if (isEmt) return f.emt;
-  return bus ? f.crtm : f.renfe;
+// Which live feed drives the pane: EMT, CRTM (buses, light rail, Metro) or Renfe.
+const pickFeed = <A, B, C>(
+  kind: { emt: boolean; crtm: boolean },
+  f: { renfe: A; crtm: B; emt: C },
+) => {
+  if (kind.emt) return f.emt;
+  return kind.crtm ? f.crtm : f.renfe;
 };
 
 // Only Renfe stops have alerts.
 const alertsOf = (renfeStop: boolean, alerts: Alert[]) => (renfeStop ? alerts : []);
-const refreshMs = (bus: boolean, isEmt: boolean) =>
-  bus && !isEmt ? CRTM_REFRESH_MS : REFRESH_MS;
+const refreshMs = (crtm: boolean) => (crtm ? CRTM_REFRESH_MS : REFRESH_MS);
 
-// Timetable file loaded (Renfe, bus) or EMT answer in (EMT stops have no file).
-const hasStopData = (list: StopFile | null, emtRows: EmtRow[] | null) => !!list || !!emtRows;
+// Timetable file loaded (Renfe, bus) or the live answer in (EMT and Metro stops have no file).
+const hasStopData = (list: StopFile | null, live: CrtmRow[] | EmtRow[] | null) =>
+  !!list || !!live;
+
+// The selected stop from the Renfe list, else from the full list (loaded lazily, memoised):
+// gives bus, tram, Metro and EMT stops their town and step-free mark.
+function useStopInfo(id: string, local: Map<string, Stop>, ready: boolean) {
+  const [full, setFull] = useState<Stop | null>(null);
+  const known = local.get(id);
+  useEffect(() => {
+    if (!ready || known) return;
+    let current = true;
+    loadAllStops().then(
+      all => current && setFull(all.find(s => s.id === id) ?? null),
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [id, known, ready]);
+  return known ?? (full?.id === id ? full : undefined);
+}
 
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
@@ -529,22 +564,26 @@ function Departures({
   const { deps: stopDeps, error: depsError } = useStopDeps(selected.id);
   const bus = isBus(stopDeps);
   const isEmt = isEmtId(selected.id);
-  const renfe = useRealtime(active && !bus && !isEmt);
-  const crtm = useCrtm(selected.id, active && bus);
+  const isMetro = isMetroId(selected.id);
+  const useCrtmFeed = bus || isMetro;
+  const renfe = useRealtime(active && !useCrtmFeed && !isEmt);
+  const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro);
   const emt = useEmt(selected.id, active && isEmt);
-  const rt = pickFeed(isEmt, bus, { renfe, crtm, emt });
+  const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const { deps, now } = useDepartureList(tt, {
     list: stopDeps,
     trips: renfe.trips,
     crtm: crtm.rows,
     emt: emt.rows,
+    metro: isMetro,
   });
-  const renfeStop = !bus && !isEmt;
+  const renfeStop = !useCrtmFeed && !isEmt;
   const alerts = alertsOf(renfeStop, renfe.alerts);
 
   const stopById = useMemo(() => new Map(tt?.stops.map(s => [s.id, s])), [tt]);
-  const wa = stopById.get(selected.id)?.wa ?? false;
-  const town = stopById.get(selected.id)?.town;
+  const info = useStopInfo(selected.id, stopById, !!tt);
+  const wa = info?.wa ?? false;
+  const town = info?.town;
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
   const groups = groupDepartures(deps);
   const isSaved = (s: { id: string }) => stops.some(x => x.id === s.id);
@@ -575,11 +614,12 @@ function Departures({
     }
   }
 
-  const empty = tt && hasStopData(stopDeps, emt.rows) && groups.length === 0;
+  const empty =
+    tt && hasStopData(stopDeps, isMetro ? crtm.rows : emt.rows) && groups.length === 0;
   return (
     <>
       {active && (
-        <RefreshBar at={rt.loadedAt} loading={rt.loading} ms={refreshMs(bus, isEmt)} />
+        <RefreshBar at={rt.loadedAt} loading={rt.loading} ms={refreshMs(useCrtmFeed)} />
       )}
       {active && (
         <AppBar

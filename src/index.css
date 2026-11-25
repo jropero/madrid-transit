@@ -427,14 +427,6 @@ button:disabled {
   color: var(--muted);
 }
 
-.dep .via {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .dep .late {
   color: var(--late);
 }
@@ -451,109 +443,10 @@ button:disabled {
   font-size: var(--t-small);
 }
 
-.route {
-  list-style: none;
-  margin: 0 0 8px 35px;
-  padding: 4px 0 4px 20px;
-  border-left: 3px solid var(--accent);
-}
-
-.route li {
-  padding: 3px 0;
-  color: var(--muted);
-}
-
 .status {
   font-size: var(--t-small);
   color: var(--muted);
   margin-top: 16px;
-}
-
-/* Route planner */
-.field {
-  margin: 12px 0;
-}
-
-.field-label {
-  font-size: 13px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  margin: 4px 0 8px;
-}
-
-.chips button {
-  font-size: var(--t-item);
-  font-weight: 300;
-  text-transform: lowercase;
-  color: var(--muted);
-}
-
-.chips button[aria-current='true'] {
-  color: var(--fg);
-}
-
-.saved-route {
-  flex: 1;
-  text-align: left;
-  font-size: var(--t-body);
-  font-weight: 300;
-  text-transform: lowercase;
-}
-
-.trip {
-  margin-bottom: 24px;
-}
-
-.trip-head {
-  margin: 0 0 8px;
-  font-size: var(--t-item);
-  font-weight: 300;
-}
-
-.trip-head span {
-  font-size: var(--t-small);
-  color: var(--muted);
-}
-
-.leg {
-  display: flex;
-  width: 100%;
-  text-align: left;
-  align-items: center;
-  gap: 10px;
-  margin: 6px 0;
-  color: var(--muted);
-}
-
-.leg strong {
-  color: var(--fg);
-  font-weight: 400;
-}
-
-.leg .late {
-  color: var(--late);
-}
-
-.walk {
-  margin-left: 50px;
-  font-style: italic;
-}
-
-.tile.sm {
-  flex: 0 0 40px;
-  height: 40px;
-}
-
-.tile.sm b {
-  inset: 0;
-  font-size: 18px;
 }
 
 .results li .dist {
@@ -576,33 +469,9 @@ button:disabled {
   font-size: var(--t-small);
 }
 
-.route.sm {
-  margin-left: 19px;
-}
-
-.headway {
-  display: block;
-  font-size: var(--t-small);
-  color: var(--muted);
-  margin-bottom: 2px;
-}
-
 .acc {
   color: var(--fg);
   margin-left: 2px;
-}
-
-.acc.part {
-  color: var(--muted);
-}
-
-.repl {
-  margin-left: 6px;
-  padding: 0 4px;
-  font-size: var(--t-tiny);
-  color: #000;
-  background: var(--late);
-  text-transform: lowercase;
 }
 
 /* Metro refresh progress: thin bar at the top edge, counting down to the next refresh; flying dots while loading */
@@ -730,11 +599,6 @@ button:disabled {
   white-space: nowrap;
 }
 
-.tag.warn {
-  color: #000;
-  background: var(--late);
-}
-
 .tag.bad {
   color: #fff;
   background: #e51400;
@@ -748,20 +612,6 @@ button:disabled {
 .cancelled .left {
   text-decoration: line-through;
   color: var(--muted);
-}
-
-.leg.cancelled strong {
-  text-decoration: line-through;
-  color: var(--muted);
-}
-
-.quay-old {
-  color: var(--muted);
-}
-
-.quay-new {
-  color: var(--late);
-  font-weight: 700;
 }
 
 /* Settings */

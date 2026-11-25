@@ -1,14 +1,14 @@
 // Shared logic: Madrid time, departures from the local timetable, GTFS-RT merging, alerts, stop search.
 import { loadJson, saveJson } from './storage.ts';
 
-// k: 'r' Renfe station, 'b' bus stop, 't' light rail / tram stop (both with its code and street, to tell the two sides of a road apart), 'e' EMT city bus stop (live only, code = stop number).
+// k: 'r' Renfe station, 'b' bus stop, 't' light rail / tram stop (both with its code and street, to tell the two sides of a road apart), 'm' Metro de Madrid station (live only, code = stop number), 'e' EMT city bus stop (live only, code = stop number).
 export type Stop = {
   id: string;
   name: string;
   lat: number;
   lon: number;
   wa: boolean;
-  k?: 'r' | 'b' | 't' | 'e';
+  k?: 'r' | 'b' | 't' | 'm' | 'e';
   code?: string;
   desc?: string;
   town?: string; // municipality (CRTM open data), empty when unknown
@@ -20,6 +20,7 @@ export type RouteInfo = {
   text: string;
   name?: string;
   tram?: boolean;
+  metro?: boolean;
 };
 export type RouteMap = Record<string, RouteInfo>;
 export type DaysFile = { from: string; to: string; days: Record<string, string[]> };
@@ -55,6 +56,7 @@ export type Departure = {
   bus?: boolean; // timetable-only stop file (buses and light rail)
   tram?: boolean;
   emt?: boolean; // EMT city bus (live arrivals only)
+  metro?: boolean; // Metro de Madrid (live arrivals only)
   planned: Date;
   expected: Date;
   cancelled: boolean;
@@ -402,6 +404,7 @@ export type CrtmRow = {
   line: string;
   dest: string;
   tram: boolean;
+  metro: boolean;
   issue: string;
 };
 
@@ -430,6 +433,7 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
       line: t.line?.shortDescription ?? routeId,
       dest: t.destinationStop?.name?.trim() ?? '',
       tram: routeId.startsWith('10__'),
+      metro: routeId.startsWith('4__'),
       issue: t.codIssue ?? '',
     });
   }
@@ -457,6 +461,7 @@ export function mergeCrtm(
       dest: r.dest,
       bus: true,
       tram: r.tram,
+      metro: r.metro,
       planned: r.when,
       expected: r.when,
       cancelled: false,
@@ -527,6 +532,7 @@ console.assert(
       line: 'A',
       dest: 'X',
       tram: false,
+      metro: false,
       issue: '1',
     };
     const out = mergeCrtm(
@@ -749,17 +755,17 @@ const inTown = (stops: Stop[], town: string): Stop[] => {
   return exact.length ? exact : stops.filter(s => fold(s.town ?? '').includes(t));
 };
 
-const MODE_ORDER = 'rtbe';
+const MODE_ORDER = 'rmtbe';
 const modeIndex = (s: Stop) => {
   const i = MODE_ORDER.indexOf(s.k ?? 'b');
   return i < 0 ? MODE_ORDER.length : i;
 };
 
-// Train stations first, then tram, then bus; then by name.
+// Train stations first, then metro, tram, bus; then by name.
 const byModeName = (a: Stop, b: Stop) =>
   modeIndex(a) - modeIndex(b) || a.name.localeCompare(b.name, 'es');
 
-// Town only: every stop in that town, trains then trams then buses. Stop text: ranked matches (within the town).
+// Town only: every stop in that town, trains, metro, trams, buses. Stop text: ranked matches (within the town).
 export const searchStops = (stops: Stop[], q: string, town = ''): Stop[] => {
   const pool = inTown(stops, town);
   const needle = fold(q.trim()).replaceAll(/\s+/g, ' ');
@@ -857,6 +863,34 @@ console.assert(
     );
   })(),
   'searchStops: exact name first, town listing orders r, t, b',
+);
+
+console.assert(
+  (() => {
+    const base = { lat: 0, lon: 0, wa: false };
+    const stops = [
+      { ...base, id: 'bus', name: 'Sol', k: 'b' as const },
+      { ...base, id: 'metro', name: 'SOL', k: 'm' as const },
+      { ...base, id: 'rail', name: 'Sol', k: 'r' as const },
+    ];
+    return (
+      searchStops(stops, 'sol')
+        .map(x => x.id)
+        .join() === 'rail,metro,bus'
+    );
+  })(),
+  'searchStops: same name orders Renfe, Metro, bus',
+);
+console.assert(
+  parseCrtm(
+    {
+      stopTimes: {
+        times: { Time: { line: { codLine: '4__1___' }, time: '2999-01-01T00:00:00Z' } },
+      },
+    },
+    new Date(),
+  )[0]?.metro === true,
+  'parseCrtm flags Metro lines',
 );
 
 export const townsOf = (stops: Stop[]): string[] =>
