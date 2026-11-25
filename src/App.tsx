@@ -14,6 +14,7 @@ import {
   directCrtm,
   fetchTripUpdates,
   isOffline,
+  warmOffline,
   isTimeout,
   loadAllStops,
   loadStopDeps,
@@ -62,12 +63,24 @@ const VIEW_LABEL: Record<View, string> = { departures: 'salidas', settings: 'aju
 
 // "Madrid-Atocha Cercanías" -> "Atocha Cercanías" for compact headers.
 
+// A failed load of a local file: a friendly text offline, the raw error otherwise.
+const loadFailure = (err: unknown, offlineText: string) =>
+  isOffline(err) ? offlineText : String(err);
+
+// Near me: geolocation errors keep their message; a lost connection gets the friendly text.
+function nearFailure(err: unknown) {
+  if (isOffline(err)) return 'sin conexión · lista de paradas no cargada';
+  return err instanceof Error ? err.message : String(err);
+}
+
 // Static timetable (stops, routes, calendar), loaded once.
 function useTimetable() {
   const [tt, setTt] = useState<Timetable | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
-    loadTimetable().then(setTt, err => setError(String(err)));
+    loadTimetable().then(setTt, err =>
+      setError(loadFailure(err, 'sin conexión · horario no disponible')),
+    );
   }, []);
   return { tt, error };
 }
@@ -85,7 +98,7 @@ function useStopDeps(id: string) {
     if (isEmtId(id) || isMetroId(id)) return; // EMT and Metro have no timetable file (live only)
     loadStopDeps(id).then(
       list => setDeps({ id, list }),
-      err => setError(String(err)),
+      err => setError(loadFailure(err, 'sin conexión · horario de esta parada no guardado')),
     );
   }, [id]);
   return { deps: deps?.id === id ? deps.list : null, error };
@@ -580,9 +593,27 @@ function expiryNote(tt: Timetable | null, now: Date, bus: boolean) {
     : '';
 }
 
+const OFFLINE_PREFIX = 'sin conexión · ';
+
+// Parts after one that already starts with the offline prefix drop it.
 function statusLine(parts: string[]) {
-  return parts.filter(Boolean).join(' · ');
+  const shown = parts.filter(Boolean);
+  const first = shown.findIndex(p => p.startsWith(OFFLINE_PREFIX));
+  return shown
+    .map((p, i) =>
+      i > first && first >= 0 && p.startsWith(OFFLINE_PREFIX)
+        ? p.slice(OFFLINE_PREFIX.length)
+        : p,
+    )
+    .join(' · ');
 }
+console.assert(
+  statusLine(['sin conexión · a', '', 'sin conexión · b']) === 'sin conexión · a · b' &&
+    statusLine(['Error: HTTP 404', 'sin conexión · desde 18:49']) ===
+      'Error: HTTP 404 · sin conexión · desde 18:49' &&
+    statusLine(['a', '', 'b']) === 'a · b',
+  'statusLine',
+);
 
 type Sources = {
   list: StopFile | null;
@@ -740,7 +771,7 @@ function Departures({
         found.length ? `paradas cercanas: ${found.length}` : 'ninguna parada a menos de 3 km',
       );
     } catch (err) {
-      rt.setStatus(err instanceof Error ? err.message : String(err));
+      rt.setStatus(nearFailure(err));
     }
   }
 
@@ -969,9 +1000,28 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
   );
 }
 
+// Preload the timetable files of the saved stops while online, away from the first paint.
+function useWarmOffline(ids: string[]) {
+  const key = ids.join(',');
+  useEffect(() => {
+    const run = () => {
+      if (navigator.onLine) void warmOffline(key ? key.split(',') : []);
+    };
+    const idle = () => ('requestIdleCallback' in window ? requestIdleCallback(run) : run());
+    const timer = window.setTimeout(idle, 2500);
+    const onOnline = () => window.setTimeout(idle, 2500);
+    window.addEventListener('online', onOnline);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [key]);
+}
+
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
   const { nav, select, jump, toast } = useStopNav(stops[0]);
+  useWarmOffline(stops.map(s => s.id));
   const { scroller, view, onScroll, goTo } = usePivot();
 
   function updateStops(next: Saved[]) {

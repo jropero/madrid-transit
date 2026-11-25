@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { loadRoute, loadStopNames } from './data.ts';
+import { isOffline, loadRoute, loadStopNames } from './data.ts';
 import { hhmm, nextStops, pickPattern, type Departure, type Pattern } from './gtfs.ts';
 
 type Loaded = { pattern: Pattern | null; names: Map<string, string> };
@@ -30,14 +30,14 @@ export default function NextStops({
   id: string;
   onSelect: (s: { id: string; name: string }, el: HTMLElement) => void;
 }) {
-  const [loaded, setLoaded] = useState<Loaded | 'error' | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | 'error' | 'offline' | null>(null);
   const { routeId, pi, dest } = dep;
   useEffect(() => {
     let current = true;
     Promise.all([loadRoute(routeId), loadStopNames()]).then(
       ([route, names]) =>
         current && setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names }),
-      () => current && setLoaded('error'),
+      err => current && setLoaded(isOffline(err) ? 'offline' : 'error'),
     );
     return () => {
       current = false;
@@ -51,13 +51,13 @@ export default function NextStops({
       </p>
     );
   const rows =
-    loaded === 'error' || !loaded.pattern
+    typeof loaded === 'string' || !loaded.pattern
       ? []
       : nextStops(loaded.pattern, stopId, dep.expected);
   if (!rows.length)
     return (
       <p className="status next" id={id}>
-        sin paradas
+        {loaded === 'offline' ? 'sin conexión · paradas no guardadas' : 'sin paradas'}
       </p>
     );
   return (

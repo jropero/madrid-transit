@@ -5,6 +5,13 @@ const CACHE = "madrid-transit-v5";
 const BASE = "/m/";
 const SHELL = ["", "index.html", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png", "apple-touch-icon.png", "fonts/selawkl.woff2", "fonts/selawk.woff2", "fonts/selawksb.woff2"].map((f) => BASE + f);
 
+// Clone synchronously: once the page consumes the body, a later clone() would throw.
+const store = (key, res) => {
+  if (!res.ok) return;
+  const copy = res.clone();
+  caches.open(CACHE).then((c) => c.put(key, copy));
+};
+
 self.addEventListener("install", (e) => {
   e.waitUntil(
     (async () => {
@@ -34,7 +41,7 @@ self.addEventListener("fetch", (e) => {
     e.respondWith(
       fetch(request)
         .then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(BASE + "index.html", res.clone()));
+          store(BASE + "index.html", res);
           return res;
         })
         .catch(() => caches.match(BASE + "index.html")),
@@ -46,7 +53,7 @@ self.addEventListener("fetch", (e) => {
     e.respondWith(
       fetch(request)
         .then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(request, res.clone()));
+          store(request, res);
           return res;
         })
         .catch(() => caches.match(request)),
@@ -58,7 +65,7 @@ self.addEventListener("fetch", (e) => {
       (hit) =>
         hit ||
         fetch(request).then((res) => {
-          if (res.ok) caches.open(CACHE).then((c) => c.put(request, res.clone()));
+          store(request, res);
           return res;
         }),
     ),
