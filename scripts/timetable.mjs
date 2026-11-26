@@ -861,11 +861,34 @@ async function busRoutes(zip, feed) {
   return routes;
 }
 
-async function busTrips(zip, routes) {
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Bus `trip_headsign` is the last stop's name ("AV.RONDA-CARMEN CONDE"); the destination riders
+// know is in `trip_short_name` after the line number ("461 PARLA", "lv 466  VALDEMORO"). Null
+// when it doesn't have that shape (notes like "Por bus-VAO"), so the caller keeps the headsign.
+const shortNameDest = (shortName, line) =>
+  line
+    ? (shortName.match(new RegExp(`^(?:\\S+\\s+)?${escapeRe(line)}\\s+(\\S.*)$`, 'i'))?.[1] ??
+      null)
+    : null;
+console.assert(
+  shortNameDest('461 PARLA', '461') === 'PARLA' &&
+    shortNameDest('lv 466  VALDEMORO', '466') === 'VALDEMORO' &&
+    shortNameDest('460 MADRID (Plaza Elíptica)', '460') === 'MADRID (Plaza Elíptica)' &&
+    shortNameDest('Por bus-VAO', '688') === null &&
+    shortNameDest('191191B ROBREGORDO', '191B') === null &&
+    shortNameDest('1 CIRCULAR', '') === null,
+  'shortNameDest',
+);
+
+async function busTrips(zip, routes, feed) {
   const trips = new Map(); // tripId -> { routeId, serviceId, head }
   for await (const t of rows(zip, 'trips.txt')) {
     if (!routes[t.route_id]) continue;
-    const head = t.trip_headsign || routes[t.route_id].name;
+    // Light rail headsigns are already destinations; its short names are "A-B" route names.
+    const dest =
+      feed.k === 'b' ? shortNameDest(t.trip_short_name, routes[t.route_id].line) : null;
+    const head = dest || t.trip_headsign || routes[t.route_id].name;
     trips.set(t.trip_id, { routeId: t.route_id, serviceId: t.service_id, head });
   }
   return trips;
@@ -1020,7 +1043,7 @@ async function buildCrtm(feed) {
   if (!(await ensureFeed(feed))) return null;
   const zip = feed.zip;
   const routes = await busRoutes(zip, feed);
-  const trips = await busTrips(zip, routes);
+  const trips = await busTrips(zip, routes, feed);
   const used = new Set([...trips.values()].map(t => t.serviceId));
   const cals = await busCalendars(zip, used);
   const byTrip = await loadByTrip(zip, trips);
