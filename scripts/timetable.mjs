@@ -889,10 +889,159 @@ async function busTrips(zip, routes, feed) {
     const dest =
       feed.k === 'b' ? shortNameDest(t.trip_short_name, routes[t.route_id].line) : null;
     const head = dest || t.trip_headsign || routes[t.route_id].name;
-    trips.set(t.trip_id, { routeId: t.route_id, serviceId: t.service_id, head });
+    trips.set(t.trip_id, {
+      routeId: t.route_id,
+      serviceId: t.service_id,
+      head,
+      short: !!dest,
+      dir: t.direction_id,
+    });
   }
   return trips;
 }
+
+// Words that say nothing about a place.
+const FILLER_WORDS = new Set(['del', 'las', 'los']);
+const destWords = n =>
+  foldName(n)
+    .split(/[^a-z0-9]+/)
+    .filter(w => w.length > 2 && !FILLER_WORDS.has(w));
+// The place of a destination, without its variant note: "MADRID (Plaza Elíptica) por los Llanos"
+// -> "MADRID", "PARLA (Por Palomeque…)" -> "PARLA".
+const destPlace = head => head.split(/\s*\(|\s+(?:por|sin|hasta|desde)\s/i)[0];
+const samePlace = (a, b) => {
+  const y = new Set(destWords(destPlace(b)));
+  return destWords(destPlace(a)).some(w => y.has(w));
+};
+console.assert(
+  samePlace('MADRID (Plaza Elíptica) por los Llanos', 'MADRID (Plaza Elíptica)') &&
+    !samePlace('PARLA (Por Palomeque previa petición de parada)', 'MADRID (Plaza Elíptica)') &&
+    samePlace('MADRID(Canillejas)', 'MADRID (Canillejas)'),
+  'samePlace',
+);
+
+// The most common value of a list (first seen wins a tie), or undefined when empty.
+const mostCommon = list => {
+  const n = new Map();
+  for (const x of list) n.set(x, (n.get(x) ?? 0) + 1);
+  return [...n].reduce((best, x) => (x[1] > (best?.[1] ?? 0) ? x : best), undefined)?.[0];
+};
+
+const lastStopOf = list => list.reduce((a, b) => (b[0] > a[0] ? b : a))[2];
+
+// Short-name trips grouped by route + direction + last stop.
+function shortGroups(trips, byTrip) {
+  const groups = new Map();
+  for (const [tripId, t] of trips) {
+    const list = byTrip.get(tripId);
+    if (!t.short || !list?.length) continue;
+    const key = `${t.routeId}|${t.dir}|${lastStopOf(list)}`;
+    groups.set(key, [...(groups.get(key) ?? []), t]);
+  }
+  return groups;
+}
+
+// Destinations per route + direction, to spot a short name that names the other end.
+function headsByDir(trips) {
+  const out = new Map();
+  for (const t of trips.values()) {
+    const key = `${t.routeId}|${t.dir}`;
+    out.set(key, (out.get(key) ?? new Set()).add(t.head));
+  }
+  return out;
+}
+
+const shareWord = (a, b) => {
+  const y = new Set(destWords(b));
+  return destWords(a).some(w => y.has(w));
+};
+
+// Does `head` misname a trip of the group whose main destination is `main`? Only when the main
+// one shares a word with the last stop's name (the trip demonstrably ends there) and `head` is a
+// destination of the opposite direction or shares no word with that name. Name variants and feed
+// typos are left alone; so are groups whose last stop names neither (line 254's mixed-up
+// directions).
+const misnamed = (g, head, main) =>
+  !samePlace(head, main) &&
+  shareWord(main, g.lastName) &&
+  (g.isOtherEnd(head) || !shareWord(head, g.lastName));
+
+// Some short names name the origin, not where the trip goes: on line 464, trips ending at Plaza
+// Elíptica are called "464 PARLA (Por Palomeque…)" or "464 YUNCLILLOS"; on 828, trips ending at
+// Canillejas "828 ALCOBENDAS". Per route + direction + last stop, the main destination is the
+// most common one that is not a destination of the opposite direction; a misnamed one (see
+// `misnamed`) takes it. `stopName` maps stop ids to names. Returns how many trips changed.
+function fixShortHeads(trips, byTrip, stopName) {
+  const byDir = headsByDir(trips);
+  let changed = 0;
+  for (const [key, group] of shortGroups(trips, byTrip)) {
+    const [routeId, dir, last] = key.split('|');
+    const other = [...(byDir.get(`${routeId}|${dir === '0' ? '1' : '0'}`) ?? [])];
+    const g = {
+      // The exact name only: "ARGANDA (Hospital) - MORATA" is not the other end's "… - RIVAS".
+      isOtherEnd: head => other.some(h => foldName(h) === foldName(head)),
+      lastName: stopName(last) ?? '',
+    };
+    changed += renameGroup(g, group);
+  }
+  return changed;
+}
+
+// Gives the group's misnamed trips its main destination; returns how many changed.
+function renameGroup(g, group) {
+  const main = mostCommon(group.map(t => t.head).filter(h => !g.isOtherEnd(h)));
+  const wrong = main ? group.filter(t => misnamed(g, t.head, main)) : [];
+  for (const t of wrong) t.head = main;
+  return wrong.length;
+}
+console.assert(
+  (() => {
+    const trip = (head, last, dir = '1', routeId = 'R') => [
+      { routeId, head, short: true, dir },
+      [
+        [1, 0, 'a'],
+        [2, 9, last],
+      ],
+    ];
+    const all = [
+      trip('MADRID (Plaza Elíptica)', 'pe'),
+      trip('MADRID (Plaza Elíptica)', 'pe'),
+      trip('MADRID (Plaza Elíptica) por los Llanos', 'pe'),
+      trip('PARLA (Por Palomeque previa petición de parada)', 'pe'),
+      trip('YUNCLILLOS', 'pe'),
+      trip('PARLA', 'rb'),
+      trip('YUNCLILLOS', 'yu', '0'),
+      // 828: more trips carry the other end's name than the real destination.
+      trip('ALCOBENDAS', 'ca', '1', 'S'),
+      trip('ALCOBENDAS', 'ca', '1', 'S'),
+      trip('MADRID(Canillejas)', 'ca', '1', 'S'),
+      trip('ALCOBENDAS', 'al', '0', 'S'),
+      // A loop: both directions end where they start, each keeps its name.
+      trip('PARLA', 'lo', '0', 'N'),
+      trip('MADRID (Atocha)', 'lo', '1', 'N'),
+    ];
+    const trips = new Map(all.map(([t], i) => [i, t]));
+    const byTrip = new Map(all.map(([, l], i) => [i, l]));
+    const names = {
+      pe: 'INTERCAMBIADOR DE PLAZA ELÍPTICA',
+      ca: 'INTERCAMBIADOR DE CANILLEJAS',
+    };
+    const n = fixShortHeads(trips, byTrip, id => names[id]);
+    const heads = [...trips.values()].map(t => t.head);
+    return (
+      n === 4 &&
+      heads[2] === 'MADRID (Plaza Elíptica) por los Llanos' &&
+      heads[3] === 'MADRID (Plaza Elíptica)' &&
+      heads[4] === 'MADRID (Plaza Elíptica)' &&
+      heads[5] === 'PARLA' &&
+      heads[7] === 'MADRID(Canillejas)' &&
+      heads[8] === 'MADRID(Canillejas)' &&
+      heads[11] === 'PARLA' &&
+      heads[12] === 'MADRID (Atocha)'
+    );
+  })(),
+  'fixShortHeads',
+);
 
 // Weekday bitmask, bit n = JS getUTCDay() n (0 = Sunday).
 const maskOf = c => WEEKDAYS.reduce((m, d, i) => (c[d] === '1' ? m | (1 << i) : m), 0);
@@ -1047,6 +1196,10 @@ async function buildCrtm(feed) {
   const used = new Set([...trips.values()].map(t => t.serviceId));
   const cals = await busCalendars(zip, used);
   const byTrip = await loadByTrip(zip, trips);
+  const stopNames = new Map();
+  for await (const s of rows(zip, 'stops.txt')) stopNames.set(s.stop_id, s.stop_name);
+  const fixed = fixShortHeads(trips, byTrip, id => stopNames.get(id));
+  if (fixed) console.log(`${feed.label}: ${fixed} short-name destinations replaced`);
   const pats = makePatterns();
   const files = busFiles(trips, byTrip, cals, pats);
   const stops = await busStops(zip, files, feed);

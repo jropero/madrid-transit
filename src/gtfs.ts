@@ -849,7 +849,27 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
       issue: t.codIssue ?? '',
     });
   }
-  return rows.sort((a, b) => a.when.getTime() - b.when.getTime());
+  return dedupeCrtm(rows.sort((a, b) => a.when.getTime() - b.when.getTime()));
+}
+
+// CRTM sometimes lists one bus twice under a minute apart (line 462 at 16578: 15:31:00 and
+// 15:31:33). Same route and destination within 60 s -> one row, preferring a time with seconds
+// (an estimate) over a whole minute (likely the schedule). `rows` sorted by time.
+const DUPLICATE_MS = 60_000;
+const hasSeconds = (r: CrtmRow) => r.when.getUTCSeconds() !== 0;
+function dedupeCrtm(rows: CrtmRow[]): CrtmRow[] {
+  const out: CrtmRow[] = [];
+  for (const r of rows) {
+    const i = out.findIndex(
+      o =>
+        o.routeId === r.routeId &&
+        o.dest === r.dest &&
+        r.when.getTime() - o.when.getTime() < DUPLICATE_MS,
+    );
+    if (i < 0) out.push(r);
+    else if (!hasSeconds(out[i]) && hasSeconds(r)) out[i] = r;
+  }
+  return out.sort((a, b) => a.when.getTime() - b.when.getTime());
 }
 
 // Self-check fixture: a bare timetable departure.
@@ -890,33 +910,44 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
 const bucketOf = (r: CrtmRow, heads: Map<string, Set<string>>) =>
   `${r.routeId}|${heads.get(r.routeId)?.has(r.dest) ? r.dest : ''}`;
 
-// Live row count and latest live time per bucket, for the rows inside the window.
-function crtmSpans(
-  rows: CrtmRow[],
-  heads: Map<string, Set<string>>,
-): Map<string, { k: number; last: number }> {
-  const spans = new Map<string, { k: number; last: number }>();
+// Live times (ms, ascending) per bucket, for the rows inside the window.
+function crtmSpans(rows: CrtmRow[], heads: Map<string, Set<string>>): Map<string, number[]> {
+  const spans = new Map<string, number[]>();
   for (const r of rows) {
-    const t = r.when.getTime();
     const key = bucketOf(r, heads);
-    const s = spans.get(key) ?? { k: 0, last: t };
-    spans.set(key, { k: s.k + 1, last: Math.max(s.last, t) });
+    spans.set(key, [...(spans.get(key) ?? []), r.when.getTime()]);
   }
+  for (const times of spans.values()) times.sort((a, b) => a - b);
   return spans;
 }
+
+// The timetable row planned nearest to `t` (the earlier one on a tie), or undefined.
+const nearestPlanned = (rows: Departure[], t: number) =>
+  rows.reduce<Departure | undefined>((best, d) => {
+    const gap = Math.abs(d.planned.getTime() - t);
+    return !best || gap < Math.abs(best.planned.getTime() - t) ? d : best;
+  }, undefined);
 
 // CRTM times are rounded to the whole minute, so a live row at hh:mm stands for timetable
 // times up to hh:mm:59.
 const CRTM_PRECISION_MS = 59_000;
 
 // Timetable rows of one covered route (and direction) that its live rows replace: everything
-// planned up to the latest live time, and at least k rows (each live bus consumes one scheduled
-// trip, so a late bus whose slot is earlier than its live time, or an early one, still removes
-// its own slot).
-function replacedByLive(rows: Departure[], s: { k: number; last: number }): Departure[] {
-  const sorted = [...rows].sort((a, b) => a.planned.getTime() - b.planned.getTime());
-  const upToLast = sorted.filter(d => d.planned.getTime() <= s.last + CRTM_PRECISION_MS).length;
-  return sorted.slice(0, Math.max(upToLast, s.k));
+// planned up to the latest live time (gone, or running late as one of the live buses), plus,
+// for each live bus in time order, the not yet claimed timetable row planned nearest to it (a
+// bus 4 min early takes its own later slot instead of leaving it as a phantom departure).
+function replacedByLive(rows: Departure[], live: number[]): Departure[] {
+  const last = live.at(-1) ?? -Infinity;
+  const out = new Set(rows.filter(d => d.planned.getTime() <= last + CRTM_PRECISION_MS));
+  const claimed = new Set<Departure>();
+  for (const t of live) {
+    const d = nearestPlanned(
+      rows.filter(x => !claimed.has(x)),
+      t,
+    );
+    if (d) claimed.add(d);
+  }
+  return [...out, ...claimed];
 }
 
 // Merge rule: a route is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
@@ -940,10 +971,10 @@ export function mergeCrtm(
   for (const d of planned)
     heads.set(d.routeId, (heads.get(d.routeId) ?? new Set()).add(d.dest));
   const dropped = new Set<Departure>();
-  for (const [key, s] of crtmSpans(inWindow, heads)) {
+  for (const [key, live] of crtmSpans(inWindow, heads)) {
     const [routeId, head] = key.split('|');
     const own = planned.filter(d => d.routeId === routeId && (!head || d.dest === head));
-    for (const d of replacedByLive(own, s)) dropped.add(d);
+    for (const d of replacedByLive(own, live)) dropped.add(d);
   }
   const live = inWindow.map((r, i) => crtmDeparture(r, i, routes));
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
@@ -987,6 +1018,34 @@ console.assert(
     );
   })(),
   'parseCrtm: single object, array (sorted, SAE false dropped), empty {}',
+);
+console.assert(
+  (() => {
+    const t = (cod: string, time: string, dest = 'X') => ({
+      line: { codLine: cod, shortDescription: cod },
+      destinationStop: { name: dest },
+      time,
+    });
+    const rows = parseCrtm(
+      {
+        stopTimes: {
+          times: {
+            Time: [
+              t('A', '2026-11-26T15:31:00+01:00'),
+              t('A', '2026-11-26T15:31:33+01:00'),
+              t('B', '2026-11-26T15:31:10+01:00'),
+              t('A', '2026-11-26T15:31:20+01:00', 'Y'),
+              t('A', '2026-11-26T15:33:00+01:00'),
+            ],
+          },
+        },
+      },
+      new Date('2026-11-26T14:00:00Z'),
+    );
+    const show = rows.map(r => `${r.routeId}${r.dest}${r.when.toISOString().slice(14, 19)}`);
+    return show.join(' ') === 'BX31:10 AY31:20 AX31:33 AX33:00';
+  })(),
+  'parseCrtm: one bus listed twice under a minute apart becomes one row (the estimate)',
 );
 console.assert(
   (() => {
@@ -1057,15 +1116,24 @@ console.assert(
     const d = mergeCrtm(plan('14:40:00', '15:10:00'), [row(at('22:34:00'))], {}, now);
     // Another route stays untouched.
     const e = mergeCrtm([dep(at('14:50:00'), 'B')], [row(at('14:52:00'))], {}, now);
+    // (f) stop 16578, line 1 at 14:46: live 14:54 is the 14:58 bus early, not the 14:38 one 16 min
+    // late; no phantom 14:58 is left (14:38 is past the last live time and goes too).
+    const f = mergeCrtm(
+      plan('14:38:00', '14:58:00', '15:18:00'),
+      [row(at('14:54:05'))],
+      {},
+      new Date(at('14:46:00')),
+    );
     return (
       show(a) === '14:48L' &&
       show(b) === '14:52L 15:00' &&
       show(c) === '14:40L 14:41L 15:10' &&
       show(d) === '14:40 15:10' &&
-      show(e) === '14:50 14:52L'
+      show(e) === '14:50 14:52L' &&
+      show(f) === '14:54L 15:18'
     );
   })(),
-  'mergeCrtm: live rows replace their timetable slots (late, early, several), far-future keeps it',
+  'mergeCrtm: live rows replace their timetable slots (late, early, nearest, several), far-future keeps it',
 );
 console.assert(
   (() => {
