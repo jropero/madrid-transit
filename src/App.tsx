@@ -18,6 +18,7 @@ import {
   fetchTripUpdates,
   fetchTripUpdatesLd,
   isOffline,
+  prefetchLive,
   warmOffline,
   isTimeout,
   errNoteOf,
@@ -43,6 +44,7 @@ import {
   liveStatusText,
   staleText,
   loadSaved,
+  prefetchTargets,
   parseSort,
   timeOrdered,
   type SortMode,
@@ -1311,10 +1313,42 @@ function useWarmOffline(ids: string[]) {
   }, [key]);
 }
 
+// Fetch the live times of the saved stops shortly after start (after the stop on screen has
+// started its own load) and whenever the app comes back to the foreground or online. The 30 s
+// memo in `fetchCrtm` / `fetchEmt` makes repeats within that time free.
+const PREFETCH_DELAY_MS = 1500;
+function usePrefetchLive(stops: Saved[]) {
+  const key = JSON.stringify(prefetchTargets(stops));
+  useEffect(() => {
+    const pending = new Set<number>();
+    const run = () => {
+      pending.forEach(id => window.clearTimeout(id));
+      pending.clear();
+      const id = window.setTimeout(() => {
+        pending.delete(id);
+        if (navigator.onLine && document.visibilityState === 'visible') {
+          prefetchLive(JSON.parse(key) as ReturnType<typeof prefetchTargets>);
+        }
+      }, PREFETCH_DELAY_MS);
+      pending.add(id);
+    };
+    const onVisible = () => document.visibilityState === 'visible' && run();
+    run();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', run);
+    return () => {
+      pending.forEach(id => window.clearTimeout(id));
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', run);
+    };
+  }, [key]);
+}
+
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
   const { nav, select, jump, toast } = useStopNav(stops[0]);
   useWarmOffline(stops.map(s => s.id));
+  usePrefetchLive(stops);
   const { scroller, view, onScroll, goTo } = usePivot();
 
   function updateStops(next: Saved[]) {

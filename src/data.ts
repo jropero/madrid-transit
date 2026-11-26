@@ -413,6 +413,14 @@ export const fetchEmt = (stopId: string) => {
   return p;
 };
 
+// Fetch the live times of other saved stops ahead (see `prefetchTargets`), so switching to one
+// shows its times at once from the 30 s memo. All in parallel; failures are ignored (the
+// stop's own load retries when it is opened).
+export function prefetchLive(targets: { crtm: string[]; emt: string[] }) {
+  for (const id of targets.crtm) void quietly(() => fetchCrtm(id));
+  for (const id of targets.emt) void quietly(() => fetchEmt(id));
+}
+
 // stopId -> routeIds serving it (all feeds), for the stop info panel; loaded on first use.
 const stopLinesMemo = new Map<string, Promise<Record<string, string[]>>>();
 export const loadStopLines = () =>

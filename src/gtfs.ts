@@ -2812,6 +2812,36 @@ console.assert(
   'healthChecks',
 );
 
+// Saved stops whose live times are worth fetching ahead at app start, in saved order: CRTM bus,
+// light rail and Metro stops (max 6) and EMT stops (max 3), the same caps as the health check,
+// to keep the shared CRTM budget in mind. The stop on screen may be among them; the fetch memo
+// shares its request.
+export function prefetchTargets(saved: Saved[]) {
+  return {
+    crtm: saved
+      .filter(s => CRTM_SAVED.test(s.id))
+      .slice(0, MAX_CRTM_CHECKS)
+      .map(s => s.id),
+    emt: saved
+      .filter(s => /^emt_\d+$/.test(s.id))
+      .slice(0, MAX_EMT_CHECKS)
+      .map(s => s.id),
+  };
+}
+console.assert(
+  (() => {
+    const ids = ['18000', 'par_8_1', 'par_10_2', 'emt_72', 'par_4_3', 'par_8_4', 'par_8_5'];
+    const more = ['par_8_6', 'par_8_7', 'emt_1', 'emt_2', 'emt_3'];
+    const t = prefetchTargets([...ids, ...more].map(id => ({ id, name: id })));
+    return (
+      t.crtm.join() === 'par_8_1,par_10_2,par_4_3,par_8_4,par_8_5,par_8_6' &&
+      t.emt.join() === 'emt_72,emt_1,emt_2' &&
+      prefetchTargets([{ id: '18000', name: 'Atocha' }]).crtm.length === 0
+    );
+  })(),
+  'prefetchTargets',
+);
+
 // CRTM rows by time: all, within [now - 1 min, now + 2 h] (soon), of those with seconds (live:
 // an estimate) vs a whole minute (CRTM timetable), and later than 2 h. `now` is the response's
 // own `actualDate` when it parses, else `fallback`.
