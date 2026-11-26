@@ -1,9 +1,47 @@
 import { useEffect, useState } from 'react';
-import { loadTimetable } from './data.ts';
-import { ddmm } from './gtfs.ts';
+import { loadTimetable, probeFeed } from './data.ts';
+import { ddmm, healthChecks, healthLine, loadSaved, type Health } from './gtfs.ts';
 import { THEMES, applyTheme, loadTheme, type Theme } from './theme.ts';
 import { setLdEnabled, useLdEnabled } from './ld.ts';
 import { ACCENTS, applyAccent, loadAccent, type AccentName } from './accent.ts';
+
+type HealthRow = { key: string; label: string; health?: Health };
+
+// "estado de las fuentes": probes every feed in parallel and fills each line as it finishes.
+function SourceHealth() {
+  const [rows, setRows] = useState<HealthRow[]>([]);
+  const [running, setRunning] = useState(false);
+  const run = () => {
+    const checks = healthChecks(loadSaved());
+    setRows(checks.map(c => ({ key: c.key, label: c.label })));
+    setRunning(true);
+    const done = checks.map(c =>
+      probeFeed(c).then(p => {
+        const health = healthLine(c.kind, p, new Date());
+        setRows(prev => prev.map(r => (r.key === c.key ? { ...r, health } : r)));
+      }),
+    );
+    void Promise.all(done).then(() => setRunning(false));
+  };
+  return (
+    <>
+      <h2 className="title">estado de las fuentes</h2>
+      <div className="themes health-run">
+        <button className="btn tilt" disabled={running} aria-busy={running} onClick={run}>
+          comprobar
+        </button>
+      </div>
+      <ul className="health" aria-live="polite">
+        {rows.map(r => (
+          <li key={r.key} className={r.health ? `health-${r.health.level}` : undefined}>
+            <span className="health-label">{r.label}</span>
+            <span>{r.health?.text ?? 'comprobando…'}</span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
 
 export default function Settings() {
   const [accent, setAccent] = useState<AccentName>(loadAccent);
@@ -56,6 +94,7 @@ export default function Settings() {
           />
         ))}
       </div>
+      <SourceHealth />
       <h2 className="title">acerca de</h2>
       <p className="about">
         Cercanías: horarios y retrasos en tiempo real de Renfe. Autobuses interurbanos, Metro,

@@ -829,6 +829,7 @@ type CrtmTime = {
 };
 export type CrtmJson = {
   stopTimes?: {
+    actualDate?: string;
     times?: { Time?: One<CrtmTime> };
     linesStatus?: { LineStatus?: One<{ line?: CrtmLine; SAEStatus?: boolean | string }> };
   };
@@ -2748,4 +2749,237 @@ console.assert(
     );
   })(),
   'compareLines: natural line order, then destination',
+);
+
+// Settings "estado de las fuentes": one diagnostic request per feed (rt.php, no cache involved).
+export type ProbeKind = 'renfe' | 'crtm' | 'emt';
+export type ProbeCheck = { key: string; label: string; kind: ProbeKind; query: string };
+export type ProbeResult = {
+  status: number; // HTTP status, 0 = none
+  ms: number; // wall time
+  ageS: number; // X-Data-Age: seconds since rt.php fetched its copy
+  upstream?: UpstreamError;
+  json: unknown;
+  error?: 'timeout' | 'network';
+  limitMs: number; // the timeout that applied
+};
+export type Health = { level: 'ok' | 'warn' | 'bad'; text: string };
+
+const CRTM_SAVED = /^par_((?:8|10|4)_\d+)$/;
+const MAX_CRTM_CHECKS = 6;
+const MAX_EMT_CHECKS = 3;
+const REFERENCE_CRTM: Saved = { id: 'par_8_17480', name: 'Moncloa (parada de referencia)' };
+
+// The checks to run: Renfe, CRTM for saved CRTM stops (or one reference stop), EMT for saved EMT stops.
+export function healthChecks(saved: Saved[]): ProbeCheck[] {
+  const crtm = saved.filter(s => CRTM_SAVED.test(s.id)).slice(0, MAX_CRTM_CHECKS);
+  const emt = saved.filter(s => /^emt_\d+$/.test(s.id)).slice(0, MAX_EMT_CHECKS);
+  return [
+    { key: 'renfe', label: 'Renfe Cercanías', kind: 'renfe', query: 'f=trip_updates' },
+    ...(crtm.length ? crtm : [REFERENCE_CRTM]).map(s => ({
+      key: `crtm:${s.id}`,
+      label: `CRTM · ${short(s.name)}`,
+      kind: 'crtm' as const,
+      query: `f=crtm&stop=${s.id.replace('par_', '')}`,
+    })),
+    ...emt.map(s => ({
+      key: `emt:${s.id}`,
+      label: `EMT · ${short(s.name)}`,
+      kind: 'emt' as const,
+      query: `f=emt&stop=${s.id.replace('emt_', '')}`,
+    })),
+  ];
+}
+console.assert(
+  (() => {
+    const mk = (id: string) => ({ id, name: id });
+    const none = healthChecks([mk('18000')]);
+    const many7 = healthChecks(
+      ['par_8_1', 'par_10_2', 'par_4_3', 'par_8_4', 'par_8_5', 'par_8_6', 'par_8_7', 'x'].map(
+        mk,
+      ),
+    );
+    const emt = healthChecks([mk('emt_72'), mk('emt_1'), mk('emt_2'), mk('emt_3')]);
+    return (
+      none.length === 2 &&
+      none[1].query === 'f=crtm&stop=8_17480' &&
+      many7.filter(c => c.kind === 'crtm').length === 6 &&
+      many7[2].query === 'f=crtm&stop=10_2' &&
+      emt.filter(c => c.kind === 'emt').length === 3 &&
+      emt[2].query === 'f=emt&stop=72'
+    );
+  })(),
+  'healthChecks',
+);
+
+// CRTM rows by time: all, within [now - 1 min, now + 2 h] (soon), of those with seconds (live:
+// an estimate) vs a whole minute (CRTM timetable), and later than 2 h. `now` is the response's
+// own `actualDate` when it parses, else `fallback`.
+export type CrtmCounts = {
+  total: number;
+  soon: number;
+  live: number;
+  sched: number;
+  later: number;
+};
+const WINDOW_MS = 2 * 3_600_000;
+const crtmBucket = (ms: number, now: number) => {
+  if (ms > now + WINDOW_MS) return 'later';
+  if (!(ms >= now - 60_000)) return null;
+  return Math.floor(ms / 1000) % 60 === 0 ? 'sched' : 'live';
+};
+export function crtmCounts(json: CrtmJson | null, fallback: Date): CrtmCounts {
+  const st = json?.stopTimes;
+  const ref = new Date(st?.actualDate ?? '').getTime();
+  const now = Number.isNaN(ref) ? fallback.getTime() : ref;
+  const out = { total: 0, soon: 0, live: 0, sched: 0, later: 0 };
+  for (const t of many(st?.times?.Time)) {
+    const bucket = crtmBucket(new Date(t?.time ?? '').getTime(), now);
+    out.total++;
+    if (bucket) out[bucket]++;
+    if (bucket === 'live' || bucket === 'sched') out.soon++;
+  }
+  return out;
+}
+console.assert(
+  (() => {
+    const t = (time: string) => ({ line: { codLine: '8__1___' }, time });
+    const c = crtmCounts(
+      {
+        stopTimes: {
+          actualDate: '2026-11-26T15:00:00+01:00',
+          times: {
+            Time: [
+              t('2026-11-26T14:50:00+01:00'),
+              t('2026-11-26T15:00:30+01:00'),
+              t('2026-11-26T15:18:00+01:00'),
+              t('2026-11-26T17:30:00+01:00'),
+            ],
+          },
+        },
+      },
+      new Date(0),
+    );
+    const one = crtmCounts(
+      { stopTimes: { times: { Time: t('2026-11-26T15:00:30+01:00') } } },
+      new Date('2026-11-26T14:00:00+01:00'),
+    );
+    return (
+      c.total === 4 &&
+      c.soon === 2 &&
+      c.live === 1 &&
+      c.sched === 1 &&
+      c.later === 1 &&
+      one.total === 1 &&
+      one.soon === 1 &&
+      one.live === 1 &&
+      crtmCounts(null, new Date()).total === 0
+    );
+  })(),
+  'crtmCounts',
+);
+
+const secsText = (ms: number) =>
+  `${(ms / 1000).toLocaleString('es-ES', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} s`;
+const countText = (n: number, one: string, many: string) =>
+  `${n.toLocaleString('es-ES')} ${n === 1 ? one : many}`;
+
+// What the body holds: line start (`bien`, or why not) and the counts.
+type Summary = { level: Health['level']; head: string; tail: string };
+const good = (tail: string): Summary => ({ level: 'ok', head: 'bien', tail });
+const empty = (head = 'respuesta vacía'): Summary => ({ level: 'warn', head, tail: '' });
+
+function crtmSummary(json: unknown, now: Date): Summary {
+  const c = crtmCounts(json as CrtmJson | null, now);
+  if (c.total === 0) return empty();
+  if (c.soon > 0) {
+    return good(
+      `${countText(c.soon, 'próxima', 'próximas')} (${c.live} en vivo, ${c.sched} horario)`,
+    );
+  }
+  const s = empty('sin horas en las próximas 2 h');
+  return { ...s, tail: c.later ? `${c.later} más tarde` : '' };
+}
+
+function summarise(kind: ProbeKind, json: unknown, now: Date): Summary {
+  if (kind === 'crtm') return crtmSummary(json, now);
+  if (kind === 'emt') {
+    const n = parseEmt(json as EmtJson | null, now).length;
+    return n ? good(countText(n, 'llegada', 'llegadas')) : empty('sin llegadas');
+  }
+  const entities = (json as { entity?: unknown } | null)?.entity;
+  const n = Array.isArray(entities) ? entities.length : 0;
+  return n ? good(countText(n, 'tren', 'trenes')) : empty();
+}
+
+// The request itself failed (no answer, HTTP error, body not JSON): text, else null.
+function failureText(p: ProbeResult, now: Date): string | null {
+  if (p.error === 'timeout') return `sin respuesta en ${Math.round(p.limitMs / 1000)} s`;
+  if (p.error) return 'sin conexión';
+  const at = hhmm(now);
+  if (p.status < 200 || p.status >= 300) {
+    const why = upstreamMeaning(p.upstream ?? { code: p.status, kind: 'http' });
+    return `error ${why} · ${at}`;
+  }
+  return p.json === null ? `respuesta no válida · ${at}` : null;
+}
+
+// One status line for a finished probe; a healthy one starts with `bien`.
+export function healthLine(kind: ProbeKind, p: ProbeResult, now: Date): Health {
+  const failure = failureText(p, now);
+  if (failure) return { level: 'bad', text: failure };
+  const s = summarise(kind, p.json, now);
+  const age = p.ageS > 0 ? `copia de hace ${Math.round(p.ageS)} s` : '';
+  const text = [s.head, secsText(p.ms), age, s.tail].filter(Boolean).join(' · ');
+  return { level: s.level, text };
+}
+console.assert(
+  (() => {
+    const now = new Date('2026-11-26T14:00:00Z');
+    const p = (o: Partial<ProbeResult>): ProbeResult => ({
+      status: 200,
+      ms: 600,
+      ageS: 0,
+      json: null,
+      limitMs: 65_000,
+      ...o,
+    });
+    const at = (time: string) => ({ line: { codLine: '8__1___' }, time });
+    const crtm = healthLine(
+      'crtm',
+      p({
+        ageS: 12,
+        json: {
+          stopTimes: {
+            times: { Time: [at('2026-11-26T14:10:30Z'), at('2026-11-26T14:20:00Z')] },
+          },
+        },
+      }),
+      now,
+    );
+    const late = healthLine(
+      'crtm',
+      p({ json: { stopTimes: { times: { Time: at('2026-11-26T18:00:00Z') } } } }),
+      now,
+    );
+    const none = healthLine('crtm', p({ ms: 400, json: { stopTimes: { times: {} } } }), now);
+    const renfe = healthLine('renfe', p({ ageS: 8, json: { entity: [{}, {}] } }), now);
+    const err = healthLine(
+      'crtm',
+      p({ status: 502, upstream: { code: 200, kind: 'html' } }),
+      now,
+    );
+    return (
+      crtm.text === 'bien · 0,6 s · copia de hace 12 s · 2 próximas (1 en vivo, 1 horario)' &&
+      late.level === 'warn' &&
+      late.text === 'sin horas en las próximas 2 h · 0,6 s · 1 más tarde' &&
+      none.text === 'respuesta vacía · 0,4 s' &&
+      renfe.text === 'bien · 0,6 s · copia de hace 8 s · 2 trenes' &&
+      err.level === 'bad' &&
+      err.text.startsWith('error HTTP 200 · respuesta no válida (HTML)') &&
+      healthLine('emt', p({ error: 'timeout' }), now).text === 'sin respuesta en 65 s' &&
+      healthLine('emt', p({ error: 'network' }), now).text === 'sin conexión'
+    );
+  })(),
+  'healthLine',
 );

@@ -17,6 +17,8 @@ import {
   type TripUpdates,
   isLiveStale,
   type FeedNote,
+  type ProbeCheck,
+  type ProbeResult,
   type UpstreamError,
   type VehiclePositions,
   type VehicleStatus,
@@ -146,6 +148,36 @@ const getLive = async <T>(
     clearTimeout(timer);
   }
 };
+
+// Settings diagnostic: one plain request to rt.php, no memo and no offline copy (so a fresh
+// answer is never hidden). Never throws.
+export async function probeFeed(check: ProbeCheck): Promise<ProbeResult> {
+  const limitMs = check.kind === 'crtm' ? CRTM_TIMEOUT_MS : LIVE_TIMEOUT_MS;
+  const started = Date.now();
+  const ctl = new AbortController();
+  const timer = setTimeout(
+    () => ctl.abort(new DOMException('no response', 'TimeoutError')),
+    limitMs,
+  );
+  const out: ProbeResult = { status: 0, ms: 0, ageS: 0, json: null, limitMs };
+  try {
+    // no-store: rt.php lets browsers keep a fresh copy up to 30 s, which would skip the server.
+    const res = await fetch(`${base}rt.php?${check.query}`, {
+      signal: ctl.signal,
+      cache: 'no-store',
+    });
+    out.status = res.status;
+    out.ageS = dataAgeMs(res) / 1000;
+    out.upstream = upstreamHeader(res);
+    out.json = await res.json().catch(() => null);
+  } catch (err) {
+    out.error = isTimeout(err) ? 'timeout' : 'network';
+  } finally {
+    clearTimeout(timer);
+  }
+  out.ms = Date.now() - started;
+  return out;
+}
 
 // Memoised; a failed load is forgotten so the next refresh retries.
 const memo = <T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>) => {
