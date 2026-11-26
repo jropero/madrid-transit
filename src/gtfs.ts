@@ -840,6 +840,7 @@ export type CrtmRow = {
   tram: boolean;
   metro: boolean;
   issue: string;
+  scheduled?: boolean; // a bus time on the whole minute: CRTM's timetable, not an estimate
 };
 
 const many = <T>(v: One<T> | undefined): T[] => {
@@ -870,10 +871,25 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
       tram: routeId.startsWith('10__'),
       metro: routeId.startsWith('4__'),
       issue: t.codIssue ?? '',
+      scheduled: isCrtmScheduled(routeId, when),
     });
   }
   return dedupeCrtm(rows.sort((a, b) => a.when.getTime() - b.when.getTime()));
 }
+
+// CRTM bus estimates carry seconds (14:50:56); a time on the whole minute is the timetable
+// (stop 16578: 1@15:18:00 and 3@15:22:00 are exactly the GTFS runs). Seen on interurban (`8_`)
+// and town (`9_`) buses only, so light rail, Metro and EMT rows stay live.
+const isCrtmScheduled = (routeId: string, when: Date) =>
+  /^[89]_/.test(routeId) && when.getUTCSeconds() === 0;
+console.assert(
+  isCrtmScheduled('8__461___', new Date('2026-11-26T15:18:00+01:00')) &&
+    !isCrtmScheduled('8__461___', new Date('2026-11-26T15:34:32+01:00')) &&
+    isCrtmScheduled('9__1__106_', new Date('2026-11-26T15:18:00+01:00')) &&
+    !isCrtmScheduled('10__ML1___', new Date('2026-11-26T15:18:00+01:00')) &&
+    !isCrtmScheduled('4__1___', new Date('2026-11-26T15:18:00+01:00')),
+  'isCrtmScheduled: whole-minute bus times are the timetable',
+);
 
 // CRTM sometimes lists one bus twice under a minute apart (line 462 at 16578: 15:31:00 and
 // 15:31:33). Same route and destination within 60 s -> one row, preferring a time with seconds
@@ -925,7 +941,8 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   planned: r.when,
   expected: r.when,
   cancelled: false,
-  live: true,
+  // A whole-minute bus time still stands for (and replaces) its timetable run, but is not live.
+  live: !r.scheduled,
 });
 
 // Replacement bucket of a live row: its route and, when its destination is the headsign of one of

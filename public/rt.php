@@ -21,7 +21,8 @@
 // also keeps the failure time and the first 2048 bytes of the answer; `&why=1` on a normal request
 // returns them as JSON {code, kind, at, body} ({} if none) without any upstream call.
 // Debug log (DEBUG_LOG, CRTM only): every CRTM call and every skipped one (negative cache,
-// budget) is appended to log-crtm-<stop>.jsonl as {at, time, ms, status, kind, bg, bytes, body};
+// budget) is appended to log-crtm-<stop>.jsonl as {at, time, ms, status, kind, bg, sapi, bytes,
+// body} (sapi = PHP_SAPI and the finish-request call in use, if any);
 // kind is ok, a failure kind, neg or budget. Bodies are kept up to LOG_BODY_MAX bytes; past
 // LOG_MAX bytes the file moves to .1 (one old generation). `&log=1` on a CRTM request returns
 // both generations as a JSON array, oldest first, without any upstream call.
@@ -236,6 +237,7 @@ function debug_log(string $kind, int $status = 0, ?float $t0 = null, ?string $bo
         'status' => $status,
         'kind' => $kind,
         'bg' => !empty($GLOBALS['bg']),
+        'sapi' => PHP_SAPI . ' ' . (finish_request_fn() ?? 'no finish_request'),
         'bytes' => $bytes,
         'body' => $body === null ? null : substr($body, 0, LOG_BODY_MAX),
     ], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -567,12 +569,24 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
 // them when a usable copy exists:
 //   - younger than $ttl: served as is;
 //   - $ttl..STALE_MAX s old: served at once, then refreshed after the response is flushed
-//     (needs fastcgi_finish_request; one refresher per stop via a lock file, others skip);
-//     without fastcgi_finish_request, or with no or an older copy, the fetch is synchronous.
+//     (needs fastcgi_finish_request (PHP-FPM) or litespeed_finish_request (LiteSpeed); one
+//     refresher per stop via a lock file, others skip); without either, or with no or an older
+//     copy, the fetch is synchronous.
 // Every answer carries X-Data-Age (seconds since the copy was fetched; 0 after a fresh fetch).
+// The SAPI's "send the response now, keep running" call, or null when there is none.
+function finish_request_fn(): ?string {
+    foreach (['fastcgi_finish_request', 'litespeed_finish_request'] as $fn) {
+        if (function_exists($fn)) {
+            return $fn;
+        }
+    }
+    return null;
+}
+
 function serve_swr(string $cache, int $ttl, callable $refresh): void {
     $age = is_file($cache) ? max(0, time() - (int) filemtime($cache)) : null;
-    $bg = $age !== null && $age >= $ttl && $age < STALE_MAX && function_exists('fastcgi_finish_request');
+    $finish = finish_request_fn();
+    $bg = $age !== null && $age >= $ttl && $age < STALE_MAX && $finish !== null;
     if ($age === null || ($age >= $ttl && !$bg)) {
         $refresh();
         clearstatcache(true, $cache);
@@ -588,7 +602,7 @@ function serve_swr(string $cache, int $ttl, callable $refresh): void {
         exit;
     }
     ignore_user_abort(true);
-    fastcgi_finish_request();
+    $finish();
     // From here nobody waits: longer upstream timeout, and fail() just ends the script.
     $GLOBALS['bg'] = true;
     @set_time_limit(run_limit());
