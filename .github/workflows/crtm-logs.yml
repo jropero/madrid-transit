@@ -1,0 +1,44 @@
+name: Fetch CRTM logs
+
+# Downloads rt.php's CRTM debug log (&log=1) for the given stops and keeps it as a run artifact.
+# Start it from the Actions tab or with `gh workflow run crtm-logs.yml -f stops="8_16578 8_07827"`.
+on:
+  workflow_dispatch:
+    inputs:
+      stops:
+        description: CRTM stop codes, space separated (8_16578 = bus stop 16578)
+        default: 8_16578 8_07827
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download logs
+        shell: bash
+        env:
+          STOPS: ${{ inputs.stops }}
+        run: |
+          set -euo pipefail
+          mkdir logs
+          for stop in $STOPS; do
+            # Same format rt.php accepts; anything else is skipped, not sent.
+            if ! [[ "$stop" =~ ^(4|6|8|10)_[0-9]{1,6}$ ]]; then
+              echo "skipping invalid stop: $stop" >&2
+              continue
+            fi
+            code="$(curl -sS -m 60 -o "logs/$stop.json" -w '%{http_code}' \
+              "https://ekult.co.uk/m/rt.php?f=crtm&stop=$stop&log=1")"
+            entries="$(jq length "logs/$stop.json" 2>/dev/null || echo '?')"
+            echo "$stop: HTTP $code, $entries entries"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crtm-logs
+          path: logs/
+          retention-days: 7
