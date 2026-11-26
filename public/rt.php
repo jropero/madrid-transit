@@ -23,7 +23,7 @@
 // Debug log (DEBUG_LOG, CRTM only): every CRTM call and every skipped one (negative cache,
 // budget) is appended to log-crtm-<stop>.jsonl as {at, time, ms, status, kind, bg, sapi, bytes,
 // body} (sapi = PHP_SAPI and the finish-request call in use, if any);
-// kind is ok, empty (an empty answer ignored, see keep_over_empty), a failure kind, neg or
+// kind is ok, empty (an empty answer, never cached, see take_empty), a failure kind, neg or
 // budget. Bodies are kept up to LOG_BODY_MAX bytes; past
 // LOG_MAX bytes the file moves to .1 (one old generation). `&log=1` on a CRTM request returns
 // both generations as a JSON array, oldest first, without any upstream call.
@@ -529,15 +529,21 @@ function crtm_no_times(string $body): bool {
     return !is_array($t) || $t === [] || ($t['Time'] ?? null) === [];
 }
 
-// Keep the cached copy instead of an empty CRTM answer while that copy has rows and is under
-// STALE_MAX s old: the empty one is most likely a glitch, and the next request asks again. An
-// older copy gives way, so a stop whose service really ended goes empty within STALE_MAX s.
-function keep_over_empty(string $cache, string $body): bool {
-    if (!crtm_no_times($body) || !is_file($cache)) {
-        return false;
+// Is the cached copy one with rows and under STALE_MAX s old (worth serving over an empty
+// answer)?
+function usable_copy(string $cache): bool {
+    return is_file($cache) && time() - (int) filemtime($cache) < STALE_MAX
+        && !crtm_no_times((string) @file_get_contents($cache));
+}
+
+// An empty CRTM answer is never cached (it is most likely a glitch, and the next request asks
+// again). The cached copy is served instead while usable_copy(); otherwise the empty answer
+// itself goes to the client uncached (`$GLOBALS['uncached']`, see serve_swr), so a stop whose
+// service really ended still reads as empty.
+function take_empty(string $cache, string $body): void {
+    if (!usable_copy($cache)) {
+        $GLOBALS['uncached'] = $body;
     }
-    $age = time() - (int) filemtime($cache);
-    return $age < STALE_MAX && !crtm_no_times((string) @file_get_contents($cache));
 }
 
 // Generic upstream (Renfe, CRTM): one fetch into $cache. Only something that decodes as JSON is
@@ -567,10 +573,12 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
         $raw = $body === false ? null : $body;
         $bytes = $raw === null ? 0 : strlen($raw);
         if ($body !== false && $body !== '' && json_decode($body) !== null) {
-            $keep = $budget !== null && keep_over_empty($cache, $body);
-            debug_log($keep ? 'empty' : 'ok', $status, $t0, $raw, $bytes);
+            $empty = $budget !== null && crtm_no_times($body);
+            debug_log($empty ? 'empty' : 'ok', $status, $t0, $raw, $bytes);
             up_ok();
-            if (!$keep) {
+            if ($empty) {
+                take_empty($cache, $body);
+            } else {
                 state_write($cache, $body, 0600);
             }
         } else {
@@ -606,12 +614,27 @@ function finish_request_fn(): ?string {
     return null;
 }
 
+// An upstream answer that was not cached (empty CRTM times, see take_empty): sent as is, fresh
+// and not to be stored by the browser.
+function serve_uncached(): void {
+    if (!isset($GLOBALS['uncached'])) {
+        return;
+    }
+    header('Content-Type: application/json');
+    header('X-Data-Age: 0');
+    header('Cache-Control: no-store');
+    up_header();
+    echo $GLOBALS['uncached'];
+    exit;
+}
+
 function serve_swr(string $cache, int $ttl, callable $refresh): void {
     $age = is_file($cache) ? max(0, time() - (int) filemtime($cache)) : null;
     $finish = finish_request_fn();
     $bg = $age !== null && $age >= $ttl && $age < STALE_MAX && $finish !== null;
     if ($age === null || ($age >= $ttl && !$bg)) {
         $refresh();
+        serve_uncached();
         clearstatcache(true, $cache);
         $age = is_file($cache) ? max(0, time() - (int) filemtime($cache)) : 0;
     }
