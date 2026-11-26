@@ -23,7 +23,8 @@
 // Debug log (DEBUG_LOG, CRTM only): every CRTM call and every skipped one (negative cache,
 // budget) is appended to log-crtm-<stop>.jsonl as {at, time, ms, status, kind, bg, sapi, bytes,
 // body} (sapi = PHP_SAPI and the finish-request call in use, if any);
-// kind is ok, a failure kind, neg or budget. Bodies are kept up to LOG_BODY_MAX bytes; past
+// kind is ok, empty (an empty answer ignored, see keep_over_empty), a failure kind, neg or
+// budget. Bodies are kept up to LOG_BODY_MAX bytes; past
 // LOG_MAX bytes the file moves to .1 (one old generation). `&log=1` on a CRTM request returns
 // both generations as a JSON array, oldest first, without any upstream call.
 
@@ -520,6 +521,25 @@ function emt_refresh(string $stop, string $cache): void {
     }
 }
 
+// CRTM stop times with no rows ("times": {}). CRTM sometimes answers so for a stop whose lines
+// are running (tram stop 10_53 at 15:23:33, four rows again 30 s later).
+function crtm_no_times(string $body): bool {
+    $j = json_decode($body, true);
+    $t = is_array($j) ? ($j['stopTimes']['times'] ?? null) : null;
+    return !is_array($t) || $t === [] || ($t['Time'] ?? null) === [];
+}
+
+// Keep the cached copy instead of an empty CRTM answer while that copy has rows and is under
+// STALE_MAX s old: the empty one is most likely a glitch, and the next request asks again. An
+// older copy gives way, so a stop whose service really ended goes empty within STALE_MAX s.
+function keep_over_empty(string $cache, string $body): bool {
+    if (!crtm_no_times($body) || !is_file($cache)) {
+        return false;
+    }
+    $age = time() - (int) filemtime($cache);
+    return $age < STALE_MAX && !crtm_no_times((string) @file_get_contents($cache));
+}
+
 // Generic upstream (Renfe, CRTM): one fetch into $cache. Only something that decodes as JSON is
 // cached (CRTM answers errors with HTML or text). Failures are remembered when $neg is set; a
 // stale cache stays the answer where there is one.
@@ -547,9 +567,12 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
         $raw = $body === false ? null : $body;
         $bytes = $raw === null ? 0 : strlen($raw);
         if ($body !== false && $body !== '' && json_decode($body) !== null) {
-            debug_log('ok', $status, $t0, $raw, $bytes);
+            $keep = $budget !== null && keep_over_empty($cache, $body);
+            debug_log($keep ? 'empty' : 'ok', $status, $t0, $raw, $bytes);
             up_ok();
-            state_write($cache, $body, 0600);
+            if (!$keep) {
+                state_write($cache, $body, 0600);
+            }
         } else {
             $timedOut = $body === false && $status === 0 && microtime(true) - $t0 >= http_timeout() - 0.5;
             [$s, $k] = up_classify($status, $raw, $timedOut);
