@@ -5,6 +5,7 @@ import NextStops, { TrainPicker } from './NextStops.tsx';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
 import { useLdEnabled } from './ld.ts';
+import { loadJson, saveJson } from './storage.ts';
 import Trail from './Trail.tsx';
 import { useStopNav, type Nav } from './nav.ts';
 import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
@@ -42,6 +43,9 @@ import {
   liveStatusText,
   staleText,
   loadSaved,
+  parseSort,
+  timeOrdered,
+  type SortMode,
   locate,
   madridDate,
   mergeCrtm,
@@ -822,6 +826,37 @@ function BoardGroups(p: {
   ));
 }
 
+// "Por hora": one row per departure in expected-time order. Each row is a LineGroup with a
+// single departure, so the tile, tap-to-expand stops and train following keep working; the
+// key is unique per trip and call (a row never takes over another's open state).
+function TimeRows(p: {
+  deps: Departure[];
+  arrivals: boolean;
+  stopId: string;
+  destName: (id: string) => string;
+  board: ReturnType<typeof useAlertBoard>;
+  now: number;
+  onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
+}) {
+  return timeOrdered(p.deps).map(d => {
+    const key = `time:${d.routeId}|${d.tripId}|${d.planned.getTime()}`;
+    return (
+      <LineGroup
+        key={`${p.stopId}|${key}`}
+        list={[d]}
+        lineKey={key}
+        defaultOpen={false}
+        stopId={p.stopId}
+        destName={endName(d, p.arrivals, p.destName)}
+        from={p.arrivals}
+        hasAlert={p.board.marks(d.routeId, d.line)}
+        now={p.now}
+        onSelect={p.onSelect}
+      />
+    );
+  });
+}
+
 // The salidas/llegadas choice, kept while browsing; the switch only exists on Renfe stations
 // (stop file loaded, not a bus one).
 function useBoardMode(showSwitch: boolean, stopId: string) {
@@ -880,6 +915,43 @@ function BoardSwitch(p: { show: boolean; mode: BoardMode; onMode: (m: BoardMode)
   );
 }
 
+const SORT_KEY = 'madrid-transit:sort';
+const SORT_MODES: { id: SortMode; label: string }[] = [
+  { id: 'line', label: 'por línea' },
+  { id: 'time', label: 'por hora' },
+];
+
+// The por línea / por hora choice, kept across stops and reloads.
+function useSortMode() {
+  const [sort, setSort] = useState<SortMode>(() =>
+    parseSort(loadJson<unknown>(SORT_KEY, null)),
+  );
+  const choose = (m: SortMode) => {
+    setSort(m);
+    saveJson(SORT_KEY, m);
+  };
+  return [sort, choose] as const;
+}
+
+// Switch between grouping departures by line and one list by time.
+function SortSwitch(p: { show: boolean; sort: SortMode; onSort: (m: SortMode) => void }) {
+  if (!p.show) return null;
+  return (
+    <div className="board-mode" role="group" aria-label="Orden de la lista">
+      {SORT_MODES.map(m => (
+        <button
+          key={m.id}
+          className="btn tilt"
+          aria-pressed={p.sort === m.id}
+          onClick={() => p.onSort(m.id)}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -922,6 +994,7 @@ function Departures({
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const renfeStop = !useCrtmFeed && !isEmt;
+  const [sort, setSort] = useSortMode();
   const { mode, setMode, showSwitch, arrivals, arrivalsAt } = useBoardMode(
     renfeStop && !!stopDeps,
     selected.id,
@@ -1060,19 +1133,34 @@ function Departures({
 
       <Alerts board={board} />
 
-      <BoardSwitch show={showSwitch} mode={mode} onMode={setMode} />
+      <div className="board-controls">
+        <BoardSwitch show={showSwitch} mode={mode} onMode={setMode} />
+        <SortSwitch show={deps.length > 0} sort={sort} onSort={setSort} />
+      </div>
 
-      <BoardGroups
-        groups={groups}
-        ldGroups={ldGroups}
-        arrivals={arrivals}
-        stopId={selected.id}
-        openLine={openLine}
-        destName={destName}
-        board={board}
-        now={now}
-        onSelect={showStop}
-      />
+      {sort === 'time' ? (
+        <TimeRows
+          deps={deps}
+          arrivals={arrivals}
+          stopId={selected.id}
+          destName={destName}
+          board={board}
+          now={now}
+          onSelect={showStop}
+        />
+      ) : (
+        <BoardGroups
+          groups={groups}
+          ldGroups={ldGroups}
+          arrivals={arrivals}
+          stopId={selected.id}
+          openLine={openLine}
+          destName={destName}
+          board={board}
+          now={now}
+          onSelect={showStop}
+        />
+      )}
       <EmptyBoard
         arrivals={arrivals}
         stopId={selected.id}

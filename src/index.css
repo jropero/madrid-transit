@@ -906,11 +906,18 @@ p.next {
   color: var(--muted);
 }
 
-/* Salidas / llegadas switch above a Renfe station's list */
+/* Salidas / llegadas and por línea / por hora switches above the list */
+.board-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 16px;
+  margin: 8px 0;
+}
+
 .board-mode {
   display: flex;
   gap: 8px;
-  margin: 8px 0 16px;
+  margin: 0 0 8px;
 }
 
 .board-mode .btn[aria-pressed='true'] {

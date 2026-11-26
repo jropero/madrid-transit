@@ -630,6 +630,29 @@ console.assert(
 export const byExpected = (a: Departure, b: Departure) =>
   a.expected.getTime() - b.expected.getTime() || a.planned.getTime() - b.planned.getTime();
 
+export type SortMode = 'line' | 'time';
+// Anything but 'time' (including a missing or foreign stored value) means 'line'.
+export const parseSort = (v: unknown): SortMode => (v === 'time' ? 'time' : 'line');
+
+export const TIME_ROWS_MAX = 30;
+
+// "Por hora": every departure in one list by expected time, capped (cancelled ones included).
+export const timeOrdered = (deps: Departure[], max = TIME_ROWS_MAX) =>
+  [...deps].sort(byExpected).slice(0, max);
+console.assert(
+  (() => {
+    const mk = (t: number) => ({ expected: new Date(t), planned: new Date(t) }) as Departure;
+    const out = timeOrdered([mk(3), mk(1), mk(2)], 2);
+    return (
+      out.length === 2 && out[0].expected.getTime() === 1 && out[1].expected.getTime() === 2
+    );
+  })() &&
+    parseSort('time') === 'time' &&
+    parseSort('x') === 'line' &&
+    parseSort(null) === 'line',
+  'timeOrdered sorts by expected time and caps; parseSort defaults to line',
+);
+
 // Trip-level delay (seconds) and cancellation from GTFS-RT; the feed covers all of Spain.
 export function applyRealtime(deps: Departure[], feed: TripUpdates | null): Departure[] {
   if (!feed?.entity) return deps;
