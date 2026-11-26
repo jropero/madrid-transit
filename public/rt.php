@@ -4,6 +4,7 @@
 //   ?f=vehicle_positions|vehicle_positions_LD  Renfe train positions (follow view), same upstream and cache.
 //   ?f=crtm&stop=8_16578    CRTM stop times (undocumented website endpoint, may change or
 //                           break), cached 30 s per stop. `stop` must match ^(4|6|8|10)_\d{1,6}$.
+//                           Optional &type=2 (only that): trips that END at the stop, own cache.
 //   ?f=emt&stop=72          EMT Madrid MobilityLabs bus arrivals (needs ../../emt.json, outside the
 //                           webroot, written by the deploy workflow), cached 30 s per stop. `stop`
 //                           must match ^\d{1,6}$. The credentials and the access token are never
@@ -691,10 +692,17 @@ if ($f === 'emt') {
 } elseif ($f === 'crtm' || in_array($f, ['trip_updates', 'trip_updates_LD', 'alerts', 'vehicle_positions', 'vehicle_positions_LD'], true)) {
     if ($f === 'crtm') {
         $stop = check_stop('crtm', '/^(4|6|8|10)_\d{1,6}\z/');
-        $url = 'https://www.crtm.es/widgets/api/GetStopsTimes.php?codStop=' . $stop . '&type=1&orderBy=2&stopTimesByIti=3';
-        $cache = state_file('crtm-' . $stop . '.json');
+        // Optional type=2 (trips that END at the stop); its cache, lock, neg, uerr and log names
+        // carry `-arr` so departures and arrivals never mix. Budget and IP limit stay shared.
+        $type = $_GET['type'] ?? null;
+        if ($type !== null && $type !== '2') {
+            fail(400, 'bad type');
+        }
+        $key = $stop . ($type === '2' ? '-arr' : '');
+        $url = 'https://www.crtm.es/widgets/api/GetStopsTimes.php?codStop=' . $stop . '&type=' . ($type === '2' ? '2' : '1') . '&orderBy=2&stopTimesByIti=3';
+        $cache = state_file('crtm-' . $key . '.json');
         $ttl = 30;
-        $neg = 'crtm-' . $stop;
+        $neg = 'crtm-' . $key;
         $budget = 'crtm';
         $GLOBALS['slow_upstream'] = true;
     } else {

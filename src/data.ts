@@ -353,13 +353,15 @@ export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f =>
 // last copy per stop is kept for offline (evictable cache entries).
 const CRTM_MEMO_MS = 30_000;
 const crtmMemo = new Map<string, { at: number; p: Promise<Feed<CrtmJson>> }>();
-export const fetchCrtm = (stopId: string) => {
-  const code = stopId.replace(/^par_/, '');
+// `arrivals` asks for trips that end at the stop (`type=2`), kept apart in memo and offline copy.
+export const fetchCrtm = (stopId: string, arrivals = false) => {
+  const base = stopId.replace(/^par_/, '');
+  const code = arrivals ? `${base}:arr` : base;
   const hit = crtmMemo.get(code);
   if (hit && Date.now() - hit.at < CRTM_MEMO_MS) return hit.p;
   const p = fetchFeed<CrtmJson>(
     `crtm:${code}`,
-    `f=crtm&stop=${encodeURIComponent(code)}`,
+    `f=crtm&stop=${encodeURIComponent(base)}${arrivals ? '&type=2' : ''}`,
     f => f,
     {},
     CRTM_TIMEOUT_MS,

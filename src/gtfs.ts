@@ -66,6 +66,7 @@ export type BusFile = {
   h: string[];
   c: BusCalendar[];
   d: [number, number, number, number, number?][];
+  t?: 1; // a trip ends here: llegadas board
 };
 export type StopFile = RenfeFile | BusFile;
 export const isBus = (f: StopFile | null | undefined): f is BusFile =>
@@ -823,6 +824,7 @@ type One<T> = T | T[];
 type CrtmLine = { codLine?: string; shortDescription?: string };
 type CrtmTime = {
   line?: CrtmLine;
+  destination?: string; // "ORIGIN-TERMINUS" on arrival rows (`type=2`)
   destinationStop?: { name?: string; codStop?: string };
   time?: string;
   codIssue?: string;
@@ -839,6 +841,7 @@ export type CrtmRow = {
   routeId: string;
   line: string;
   dest: string; // CRTM's destination text, or the timetable headsign once a direction is assigned
+  route?: string; // CRTM's `destination` text ("ORIGIN-TERMINUS"), used by the arrivals board
   code?: string; // CRTM code of the destination stop (`8_16578`), when given
   pi?: number; // route pattern of the assigned timetable direction (when it has just one)
   tram: boolean;
@@ -871,6 +874,7 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
       routeId,
       line: t.line?.shortDescription ?? routeId,
       dest: t.destinationStop?.name?.trim() ?? '',
+      route: t.destination?.trim() || undefined,
       code: t.destinationStop?.codStop?.trim() || undefined,
       tram: routeId.startsWith('10__'),
       metro: routeId.startsWith('4__'),
@@ -880,6 +884,23 @@ export function parseCrtm(json: CrtmJson | null, now: Date): CrtmRow[] {
   }
   return dedupeCrtm(rows.sort((a, b) => a.when.getTime() - b.when.getTime()));
 }
+
+// Arrivals (`type=2`): CRTM's destination text is "ORIGIN-TERMINUS" (both with their town in
+// brackets); the origin is what comes before the first "-", the whole text when there is none.
+export const arrivalOrigin = (text: string) => {
+  const i = text.indexOf('-');
+  return (i < 0 ? text : text.slice(0, i)).trim();
+};
+// Arrival rows name their origin in `dest` (taken from `route`, CRTM's `destination`), so grouping by line + destination groups by origin.
+export const arrivalRows = (rows: CrtmRow[]): CrtmRow[] =>
+  rows.map(r => ({ ...r, dest: arrivalOrigin(r.route ?? r.dest) }));
+console.assert(
+  arrivalOrigin('POZUELO (Ciudad de la Imagen)-MADRID (Intercambiador Moncloa)') ===
+    'POZUELO (Ciudad de la Imagen)' &&
+    arrivalOrigin(' PARLA ') === 'PARLA' &&
+    arrivalOrigin('A-B-C') === 'A',
+  'arrivalOrigin: text before the first dash, trimmed',
+);
 
 // CRTM bus estimates carry seconds (14:50:56); a time on the whole minute is the timetable
 // (stop 16578: 1@15:18:00 and 3@15:22:00 are exactly the GTFS runs). Seen on interurban (`8_`)

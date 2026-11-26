@@ -7,6 +7,10 @@ const crtmStop = (path: string) => {
   return /^(4|6|8|10)_\d{1,6}$/.test(stop) ? stop : '';
 };
 
+// 2 when a /m/rt.php?f=crtm request asks for arrivals (`type=2`), else 1.
+const crtmType = (path: string) =>
+  new URL(path, 'http://x').searchParams.get('type') === '2' ? 2 : 1;
+
 // The validated `stop` of a /m/rt.php?f=emt request (same pattern as rt.php), else ''.
 const emtStop = (path: string) => {
   const stop = new URL(path, 'http://x').searchParams.get('stop') ?? '';
@@ -33,7 +37,7 @@ export default defineConfig({
         changeOrigin: true,
         bypass: req => (crtmStop(req.url ?? '') ? undefined : false),
         rewrite: path =>
-          `/widgets/api/GetStopsTimes.php?codStop=${crtmStop(path)}&type=1&orderBy=2&stopTimesByIti=3`,
+          `/widgets/api/GetStopsTimes.php?codStop=${crtmStop(path)}&type=${crtmType(path)}&orderBy=2&stopTimesByIti=3`,
       },
       // Dev stand-in for public/rt.php: same URL as production, straight to Renfe's GTFS-RT JSON.
       '/m/rt.php': {

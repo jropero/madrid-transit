@@ -54,6 +54,7 @@ import {
   nearStops,
   parseAlerts,
   parseCrtm,
+  arrivalRows,
   parseEmt,
   parseEmtIncidents,
   saveSaved,
@@ -262,7 +263,15 @@ const crtmFailure = (err: unknown, timetable: boolean): Status => {
 
 // CRTM stop times for a bus or tram stop, every 60 s while `active`; failures and empty
 // answers leave the timetable in charge.
-function useCrtm(stopId: string, active: boolean, timetable: boolean, file: StopFile | null) {
+function useCrtm(
+  stopId: string,
+  active: boolean,
+  timetable: boolean,
+  file: StopFile | null,
+  arrivals: boolean,
+) {
+  // Keyed by stop and mode, so a stop's departures never show on its arrivals board.
+  const gotKey = `${stopId}|${arrivals ? 'arr' : 'dep'}`;
   const [got, setGot] = useState<{ id: string; rows: CrtmRow[] } | null>(null);
   const [status, setStatus] = useState<Status>('Cargando…');
   const [note, setNote] = useState<FeedNote | null>(null);
@@ -272,21 +281,21 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
   const load = useCallback(async () => {
     setLoadingSince(Date.now());
     try {
-      const feed = await fetchCrtm(stopId);
+      const feed = await fetchCrtm(stopId, arrivals);
       const parsed = parseCrtm(feed.data, new Date());
-      const rows = await directCrtm(parsed, file, stopId);
-      setGot({ id: stopId, rows });
+      const rows = arrivals ? arrivalRows(parsed) : await directCrtm(parsed, file, stopId);
+      setGot({ id: gotKey, rows });
       setStatus(crtmStatus(rows, feed, timetable));
       setNote(feedNoteOf('CRTM', feed));
     } catch (err) {
-      setGot({ id: stopId, rows: [] });
+      setGot({ id: gotKey, rows: [] });
       setStatus(crtmFailure(err, timetable));
       setNote(errNoteOf('CRTM', err));
     } finally {
       setLoadingSince(null);
       setLoadedAt(Date.now());
     }
-  }, [stopId, timetable, file]);
+  }, [stopId, gotKey, arrivals, timetable, file]);
 
   useEffect(() => {
     if (active) void load();
@@ -294,7 +303,7 @@ function useCrtm(stopId: string, active: boolean, timetable: boolean, file: Stop
   usePolling(active, loadedAt, load, setLoadedAt, CRTM_REFRESH_MS);
 
   return {
-    rows: got?.id === stopId ? got.rows : null,
+    rows: got?.id === gotKey ? got.rows : null,
     statusText: useStatusText(status, active, loadingSince, 'CRTM'),
     note,
     setStatus,
@@ -719,18 +728,23 @@ type Sources = {
   emt: EmtRow[] | null;
   metro: boolean;
   ld: boolean;
-  arrivals: string | null; // Renfe arrivals board: the stop id
+  arrivals: string | null; // arrivals board (Renfe station or bus/tram terminus): the stop id
 };
+
+// The arrivals board: Renfe from the timetable plus GTFS-RT, bus and tram termini from CRTM
+// arrival rows only (the timetable has no arrivals for them).
+function arrivalsAt(tt: Timetable, src: Sources, list: StopFile, at: Date): Departure[] {
+  if (isBus(list)) return mergeCrtm([], src.crtm, tt.routes, at);
+  const arr = renfeArrivals(list, tt.days, tt.routes, at, src.ld, src.arrivals ?? '');
+  return dedupeLd(applyRealtime(arr, src.trips), true);
+}
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   if (src.emt) return emtDepartures(src.emt, tt.routes);
   // Metro: live times only, no timetable.
   if (src.metro) return mergeCrtm([], src.crtm, tt.routes, at);
   if (!src.list) return [];
-  if (src.arrivals !== null && !isBus(src.list)) {
-    const arr = renfeArrivals(src.list, tt.days, tt.routes, at, src.ld, src.arrivals);
-    return dedupeLd(applyRealtime(arr, src.trips), true);
-  }
+  if (src.arrivals !== null) return arrivalsAt(tt, src, src.list, at);
   const planned = scheduled(src.list, tt.days, tt.routes, at, src.ld);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
   return isBus(src.list)
@@ -771,6 +785,12 @@ const refreshMs = (crtm: boolean) => (crtm ? CRTM_REFRESH_MS : REFRESH_MS);
 // Timetable file loaded (Renfe, bus) or the live answer in (EMT and Metro stops have no file).
 const hasStopData = (list: StopFile | null, live: CrtmRow[] | EmtRow[] | null) =>
   !!list || !!live;
+// A bus arrivals board has no timetable: it waits for CRTM's arrival rows.
+const boardHasData = (
+  f: { list: StopFile | null; metro: boolean; busArrivals: boolean },
+  crtm: CrtmRow[] | null,
+  emt: EmtRow[] | null,
+) => (f.busArrivals ? !!crtm : hasStopData(f.list, liveRows(f.metro, crtm, emt)));
 
 // The selected stop from the Renfe list, else from the full list (loaded lazily, memoised):
 // gives bus, tram, Metro and EMT stops their town and step-free mark.
@@ -864,8 +884,8 @@ function TimeRows(p: {
   });
 }
 
-// The salidas/llegadas choice, kept while browsing; the switch only exists on Renfe stations
-// (stop file loaded, not a bus one).
+// The salidas/llegadas choice, kept while browsing; the switch only exists on Renfe stations and
+// on bus/tram termini (`t: 1`).
 function useBoardMode(showSwitch: boolean, stopId: string) {
   const [mode, setMode] = useState<BoardMode>('salidas');
   const arrivals = showSwitch && mode === 'llegadas';
@@ -899,10 +919,14 @@ const isEmpty = (tt: Timetable | null, hasData: boolean, groups: GroupList) =>
 
 const emptyRoutes = (empty: boolean, tt: Timetable | null) => (empty ? tt?.routes : undefined);
 
+// Renfe stations and bus/tram termini (`t: 1`) get the salidas/llegadas switch.
+const hasBoardSwitch = (renfeStop: boolean, list: StopFile | null) =>
+  !!list && (renfeStop || (isBus(list) && list.t === 1));
+
 type BoardMode = 'salidas' | 'llegadas';
 const BOARD_MODES: BoardMode[] = ['salidas', 'llegadas'];
 
-// Switch between a Renfe station's departures and arrivals.
+// Switch between a stop's departures and arrivals.
 function BoardSwitch(p: { show: boolean; mode: BoardMode; onMode: (m: BoardMode) => void }) {
   const { mode, onMode } = p;
   if (!p.show) return null;
@@ -996,16 +1020,17 @@ function Departures({
   const isEmt = isEmtId(selected.id);
   const isMetro = isMetroId(selected.id);
   const useCrtmFeed = bus || isMetro;
-  const renfe = useRealtime(active && !useCrtmFeed && !isEmt, ld);
-  const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro, stopDeps);
-  const emt = useEmt(selected.id, active && isEmt);
-  const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const renfeStop = !useCrtmFeed && !isEmt;
-  const [sort, setSort] = useSortMode();
+  const renfe = useRealtime(active && !useCrtmFeed && !isEmt, ld);
   const { mode, setMode, showSwitch, arrivals, arrivalsAt } = useBoardMode(
-    renfeStop && !!stopDeps,
+    hasBoardSwitch(renfeStop, stopDeps),
     selected.id,
   );
+  const busArrivals = arrivals && bus;
+  const crtm = useCrtm(selected.id, active && useCrtmFeed, !isMetro, stopDeps, busArrivals);
+  const emt = useEmt(selected.id, active && isEmt);
+  const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
+  const [sort, setSort] = useSortMode();
   const { deps, now } = useDepartureList(tt, {
     list: stopDeps,
     trips: renfe.trips,
@@ -1066,7 +1091,7 @@ function Departures({
 
   const empty = isEmpty(
     tt,
-    hasStopData(stopDeps, liveRows(isMetro, crtm.rows, emt.rows)),
+    boardHasData({ list: stopDeps, metro: isMetro, busArrivals }, crtm.rows, emt.rows),
     allGroups,
   );
   return (

@@ -1098,6 +1098,14 @@ function calIndex(f, calKey, serviceId) {
 }
 const calKeys = cals => new Map([...cals].map(([id, cal]) => [id, JSON.stringify(cal)]));
 
+// `t: 1` = some trip of the feed ends at this stop (the client offers the llegadas board).
+function markTermini(files, byTrip) {
+  for (const list of byTrip.values()) {
+    const f = list.length > 1 ? files.get(list.at(-1)[2]) : null;
+    if (f) f.t = 1;
+  }
+}
+
 function busFiles(trips, byTrip, cals, pats) {
   const files = new Map();
   const patOf = (tripId, list) => pats.add(trips.get(tripId).routeId, patternOf(list));
@@ -1109,6 +1117,7 @@ function busFiles(trips, byTrip, cals, pats) {
     f.d.push([secs, ci, indexOf(f.r, routeId), indexOf(f.h, head), pi]);
     files.set(stopId, f);
   }
+  markTermini(files, byTrip);
   for (const f of files.values()) {
     delete f.keys;
     f.d.sort((a, b) => a[0] - b[0]);
@@ -1122,6 +1131,7 @@ function busFiles(trips, byTrip, cals, pats) {
 function mergeBusFiles(a, b) {
   const keys = a.c.map(c => JSON.stringify(c));
   const out = { kind: 'bus', r: [...a.r], h: [...a.h], c: [], d: [...a.d] };
+  if (a.t || b.t) out.t = 1;
   const ri = b.r.map(v => indexOf(out.r, v));
   const hi = b.h.map(v => indexOf(out.h, v));
   const ci = b.c.map(c => indexOf(keys, JSON.stringify(c)));
