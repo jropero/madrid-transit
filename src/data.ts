@@ -30,9 +30,11 @@ const getJson = async <T>(url: string): Promise<T> => {
   return (await res.json()) as T;
 };
 
-// Live feeds give up after 12 s (CRTM answers in 0.4-8 s, erratically). The abort reason is a
-// `TimeoutError`, which `isOffline` (TypeError only) does not mistake for a lost connection.
+// Live feeds give up after 12 s. CRTM gets 65 s: it sometimes takes 15 s or more, and rt.php
+// waits up to 60 s for it (CRTM_TIMEOUT). The abort reason is a `TimeoutError`, which
+// `isOffline` (TypeError only) does not mistake for a lost connection.
 const LIVE_TIMEOUT_MS = 12_000;
+const CRTM_TIMEOUT_MS = 65_000;
 export const isTimeout = (err: unknown) =>
   err instanceof DOMException && err.name === 'TimeoutError';
 
@@ -123,11 +125,12 @@ export async function fetchWhy(url: string): Promise<Why | null> {
 
 const getLive = async <T>(
   url: string,
+  timeoutMs: number,
 ): Promise<{ data: T; fetchedAt: number; upstream?: UpstreamError }> => {
   const ctl = new AbortController();
   const timer = setTimeout(
     () => ctl.abort(new DOMException('no response', 'TimeoutError')),
-    LIVE_TIMEOUT_MS,
+    timeoutMs,
   );
   try {
     const res = await fetch(url, { signal: ctl.signal });
@@ -243,11 +246,12 @@ async function fetchFeed<T, R = T>(
   query: string,
   slim: (raw: R) => T,
   empty?: T,
+  timeoutMs = LIVE_TIMEOUT_MS,
 ): Promise<Feed<T>> {
   const key = `madrid-transit:cache:rt:${name}`;
   const url = `${base}rt.php?${query}`;
   try {
-    const live = await getLive<R>(url);
+    const live = await getLive<R>(url, timeoutMs);
     const data = slim(live.data);
     saveJson(key, { at: live.fetchedAt, data });
     return cutoff(
@@ -326,6 +330,7 @@ export const fetchCrtm = (stopId: string) => {
     `f=crtm&stop=${encodeURIComponent(code)}`,
     f => f,
     {},
+    CRTM_TIMEOUT_MS,
   );
   crtmMemo.set(code, { at: Date.now(), p });
   // Failures and offline copies are not memoised: the next refresh retries.

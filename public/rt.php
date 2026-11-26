@@ -33,6 +33,7 @@ const CRTM_BUDGET = 30; // CRTM upstream calls per minute
 const IP_LIMIT = 120;   // requests per client per minute
 const NEG_TTL = 120;    // seconds a failed stop is remembered
 const STALE_MAX = 120;  // seconds a stale copy may still be served while it is refreshed
+const CRTM_TIMEOUT = 60; // CRTM upstream timeout in seconds (it sometimes takes 15 s or more)
 const DEBUG_LOG = true;     // log CRTM calls per stop (see the header)
 const LOG_MAX = 1048576;    // bytes per log file before it rotates to .1
 const LOG_BODY_MAX = 65536; // bytes of each answer kept in the log
@@ -69,9 +70,18 @@ function state_dir(): string {
     return $dir;
 }
 
-// Upstream timeout in seconds: 8 while a client waits, 12 in a background refresh.
+// Upstream timeout in seconds: 8 while a client waits, 12 in a background refresh; CRTM always
+// CRTM_TIMEOUT.
 function http_timeout(): int {
+    if (!empty($GLOBALS['slow_upstream'])) {
+        return CRTM_TIMEOUT;
+    }
     return empty($GLOBALS['bg']) ? 8 : 12;
+}
+
+// PHP run time limit: the upstream timeout plus margin (30 s default).
+function run_limit(): int {
+    return max(30, http_timeout() + 15);
 }
 
 function state_file(string $name): string {
@@ -553,7 +563,7 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
     }
 }
 
-// Stale-while-revalidate. Upstreams answer erratically (0.4-8 s), so nobody should wait for
+// Stale-while-revalidate. Upstreams answer erratically (0.4-15 s), so nobody should wait for
 // them when a usable copy exists:
 //   - younger than $ttl: served as is;
 //   - $ttl..STALE_MAX s old: served at once, then refreshed after the response is flushed
@@ -581,7 +591,7 @@ function serve_swr(string $cache, int $ttl, callable $refresh): void {
     fastcgi_finish_request();
     // From here nobody waits: longer upstream timeout, and fail() just ends the script.
     $GLOBALS['bg'] = true;
-    @set_time_limit(30);
+    @set_time_limit(run_limit());
     $lock = @fopen(state_file('lock-' . basename($cache)), 'c');
     if ($lock !== false && flock($lock, LOCK_EX | LOCK_NB)) {
         $refresh();
@@ -610,6 +620,7 @@ if ($f === 'emt') {
         $ttl = 30;
         $neg = 'crtm-' . $stop;
         $budget = 'crtm';
+        $GLOBALS['slow_upstream'] = true;
     } else {
         $url = 'https://gtfsrt.renfe.com/' . $f . '.json';
         $cache = state_file('renfe-' . $f . '.json');
@@ -625,6 +636,7 @@ if ($f === 'emt') {
 }
 
 rate_limit_ip();
+@set_time_limit(run_limit());
 $GLOBALS['uerr_cache'] = $cache;
 if (($_GET['why'] ?? '') === '1') {
     serve_why();
