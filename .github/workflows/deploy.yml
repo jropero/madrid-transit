@@ -70,6 +70,9 @@ jobs:
           check 'f=crtm&stop=8_999999999' 400
           check 'f=crtm&stop=8_0' 404
           check 'f=emt&stop=0' 404
+          # The debug log answers without any upstream call: a JSON array.
+          check 'f=crtm&stop=8_16578&log=1' 200
+          grep -q '^\[' /tmp/smoke.out
           # The allow-list file must not output anything when requested directly.
           [ -z "$(curl -s http://127.0.0.1:8099/rt-stops.php)" ]
           echo "rt.php smoke test ok"

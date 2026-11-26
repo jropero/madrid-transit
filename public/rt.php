@@ -20,6 +20,11 @@
 // with a stale copy and with the 502/503 answers (the client shows it under the status). The file
 // also keeps the failure time and the first 2048 bytes of the answer; `&why=1` on a normal request
 // returns them as JSON {code, kind, at, body} ({} if none) without any upstream call.
+// Debug log (DEBUG_LOG, CRTM only): every CRTM call and every skipped one (negative cache,
+// budget) is appended to log-crtm-<stop>.jsonl as {at, time, ms, status, kind, bg, bytes, body};
+// kind is ok, a failure kind, neg or budget. Bodies are kept up to LOG_BODY_MAX bytes; past
+// LOG_MAX bytes the file moves to .1 (one old generation). `&log=1` on a CRTM request returns
+// both generations as a JSON array, oldest first, without any upstream call.
 
 header('X-Content-Type-Options: nosniff');
 
@@ -28,6 +33,9 @@ const CRTM_BUDGET = 30; // CRTM upstream calls per minute
 const IP_LIMIT = 120;   // requests per client per minute
 const NEG_TTL = 120;    // seconds a failed stop is remembered
 const STALE_MAX = 120;  // seconds a stale copy may still be served while it is refreshed
+const DEBUG_LOG = true;     // log CRTM calls per stop (see the header)
+const LOG_MAX = 1048576;    // bytes per log file before it rotates to .1
+const LOG_BODY_MAX = 65536; // bytes of each answer kept in the log
 
 function fail(int $code, string $msg, int $retry = 0): void {
     if (!empty($GLOBALS['bg'])) {
@@ -190,6 +198,57 @@ function serve_why(): void {
     header('Cache-Control: no-store');
     $r = up_load();
     echo $r === null ? '{}' : json_encode($r, JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+// ---------------------------------------------------------------- Debug log
+
+// log-crtm-<stop>.jsonl for a CRTM request, else null (nothing else is logged).
+function log_file(): ?string {
+    $name = isset($GLOBALS['uerr_cache']) ? basename($GLOBALS['uerr_cache']) : '';
+    return DEBUG_LOG && strncmp($name, 'crtm-', 5) === 0 ? state_file('log-' . $name . 'l') : null;
+}
+
+// One log line for the current cache file. $body null = not kept (or none).
+function debug_log(string $kind, int $status = 0, ?float $t0 = null, ?string $body = null, int $bytes = 0): void {
+    $file = log_file();
+    if ($file === null) {
+        return;
+    }
+    clearstatcache(true, $file);
+    if (is_file($file) && filesize($file) > LOG_MAX) {
+        @rename($file, $file . '.1');
+    }
+    $line = json_encode([
+        'at' => time(),
+        'time' => (new DateTime('now', new DateTimeZone('Europe/Madrid')))->format('Y-m-d H:i:s'),
+        'ms' => $t0 === null ? null : (int) round((microtime(true) - $t0) * 1000),
+        'status' => $status,
+        'kind' => $kind,
+        'bg' => !empty($GLOBALS['bg']),
+        'bytes' => $bytes,
+        'body' => $body === null ? null : substr($body, 0, LOG_BODY_MAX),
+    ], JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $old = umask(0077);
+    @file_put_contents($file, $line . "\n", FILE_APPEND | LOCK_EX);
+    umask($old);
+}
+
+// ?log=1: both log generations as one JSON array, oldest first. Never contacts an upstream.
+function serve_log(): void {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    $file = log_file();
+    $lines = [];
+    foreach ($file === null ? [] : [$file . '.1', $file] as $f) {
+        $raw = is_file($f) ? (string) @file_get_contents($f) : '';
+        foreach (explode("\n", $raw) as $l) {
+            if ($l !== '') {
+                $lines[] = $l;
+            }
+        }
+    }
+    echo '[' . implode(',', $lines) . ']';
     exit;
 }
 
@@ -456,10 +515,12 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
     $stale = is_file($cache);
     if ($neg !== null && neg_get($neg) !== null) {
         // Failed recently: no upstream call.
+        debug_log('neg');
         if (!$stale) {
             fail(502, 'upstream unavailable');
         }
     } elseif ($budget !== null && !budget_ok($budget, CRTM_BUDGET)) {
+        debug_log('budget');
         if (!$stale) {
             fail(503, 'busy', 30);
         }
@@ -471,13 +532,17 @@ function generic_refresh(string $url, string $cache, ?string $neg, ?string $budg
         if (isset($http_response_header[0]) && preg_match('#^HTTP/\S+ (\d{3})#', $http_response_header[0], $m)) {
             $status = (int) $m[1];
         }
+        $raw = $body === false ? null : $body;
+        $bytes = $raw === null ? 0 : strlen($raw);
         if ($body !== false && $body !== '' && json_decode($body) !== null) {
+            debug_log('ok', $status, $t0, $raw, $bytes);
             up_ok();
             state_write($cache, $body, 0600);
         } else {
             $timedOut = $body === false && $status === 0 && microtime(true) - $t0 >= http_timeout() - 0.5;
-            [$s, $k] = up_classify($status, $body === false ? null : $body, $timedOut);
-            up_fail($s, $k, $body === false ? null : $body);
+            [$s, $k] = up_classify($status, $raw, $timedOut);
+            debug_log($k, $status, $t0, $raw, $bytes);
+            up_fail($s, $k, $raw);
             if ($neg !== null) {
                 neg_set($neg, 502, 'upstream unavailable');
             }
@@ -563,5 +628,8 @@ rate_limit_ip();
 $GLOBALS['uerr_cache'] = $cache;
 if (($_GET['why'] ?? '') === '1') {
     serve_why();
+}
+if (($_GET['log'] ?? '') === '1') {
+    serve_log();
 }
 serve_swr($cache, $ttl, $refresh);
