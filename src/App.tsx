@@ -440,9 +440,11 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
       className={`dep${d.cancelled ? ' cancelled' : ''}${d.live ? ' is-live' : ''}${d.unconfirmed ? ' unconfirmed' : ''}`}
     >
       {d.live && <span className="dot" aria-hidden="true" />}
-      <span className="time">{hhmm(d.planned)}</span>
+      <span className="when">
+        <span className="time">{hhmm(d.planned)}</span>
+        {d.unconfirmed && <span className="tag unconfirmed">no confirmado</span>}
+      </span>
       {d.live && <span className="sr-only"> en vivo</span>}
-      {d.unconfirmed && <span className="tag unconfirmed">no confirmado</span>}
       {delay > 0 && !d.cancelled && <span className="late">+{delay}'</span>}
       {d.cancelled ? (
         <span className="tag bad">cancelado</span>
