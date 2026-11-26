@@ -521,12 +521,28 @@ function emt_refresh(string $stop, string $cache): void {
     }
 }
 
-// CRTM stop times with no rows ("times": {}). CRTM sometimes answers so for a stop whose lines
-// are running (tram stop 10_53 at 15:23:33, four rows again 30 s later).
+// Seconds ahead an answer must have a time in to count (the client's 2 h window).
+const CRTM_HORIZON = 7200;
+
+// CRTM stop times with no row in [now - 60 s, now + CRTM_HORIZON]: "times": {} (tram stop 10_53
+// at 15:23:33, four rows again 30 s later) or only far-future rows (bus stop 07827 at 15:30:40:
+// 461 at 23:34 and the night N806, the near 461s back a minute later). CRTM sometimes answers so
+// for a stop whose lines are running.
 function crtm_no_times(string $body): bool {
     $j = json_decode($body, true);
-    $t = is_array($j) ? ($j['stopTimes']['times'] ?? null) : null;
-    return !is_array($t) || $t === [] || ($t['Time'] ?? null) === [];
+    $t = is_array($j) ? ($j['stopTimes']['times']['Time'] ?? null) : null;
+    if (!is_array($t)) {
+        return true;
+    }
+    $rows = isset($t['time']) ? [$t] : $t; // one row comes as an object, several as a list
+    $now = time();
+    foreach ($rows as $r) {
+        $at = is_array($r) && is_string($r['time'] ?? null) ? strtotime($r['time']) : false;
+        if ($at !== false && $at >= $now - 60 && $at <= $now + CRTM_HORIZON) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Is the cached copy one with rows and under STALE_MAX s old (worth serving over an empty
