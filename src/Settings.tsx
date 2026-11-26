@@ -126,7 +126,11 @@ export default function Settings() {
         <a href="https://www.transportes.gob.es/" target="_blank" rel="noopener">
           MITRAMS
         </a>
-        .
+        . Tiempo:{' '}
+        <a href="https://open-meteo.com/" target="_blank" rel="noopener">
+          Open-Meteo.com
+        </a>{' '}
+        (CC BY 4.0).
       </p>
     </>
   );

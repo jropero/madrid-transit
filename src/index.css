@@ -666,7 +666,7 @@ p.next {
   text-transform: lowercase;
 }
 
-.title + .sub {
+.title-row + .sub {
   display: block;
   margin-top: -8px;
   margin-bottom: 8px;
@@ -1019,6 +1019,38 @@ p.next {
 
 .about a {
   color: var(--accent);
+}
+
+/* Current weather: far right of the title row, so its right edge lines up with the minutes
+   column of the departure rows (both end at the pane's right gutter). */
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+
+.title-row .title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.weather {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--fg);
+  font-size: var(--t-title);
+  font-weight: 300;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.weather .icon {
+  color: var(--muted);
 }
 
 /* Stop info button (inside the title), panel, line list and terminus text */

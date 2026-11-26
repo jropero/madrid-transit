@@ -1,5 +1,6 @@
 // Loading of the local timetable (public/data) and the live Renfe GTFS-RT feeds (via rt.php).
 import { loadJson, saveJson } from './storage.ts';
+import { parseWeather, type WeatherNow } from './weather.ts';
 import {
   assignDirections,
   isBus,
@@ -451,4 +452,50 @@ export async function warmOffline(ids: string[]) {
       await quietly(() => loadRoute(r));
     }
   }
+}
+
+// Current weather (Open-Meteo, no key) per coordinate rounded to 2 decimals (~1 km), so nearby
+// stops share one request and the exact stop is not sent. Memoised 15 min; the last answer per
+// coordinate is kept for offline (evictable cache entry, dropped past 3 h). Never throws.
+const WEATHER_MEMO_MS = 15 * 60_000;
+const WEATHER_STORED_MAX_MS = 3 * 60 * 60_000;
+const WEATHER_TIMEOUT_MS = 8000;
+const weatherMemo = new Map<string, { at: number; p: Promise<WeatherNow | null> }>();
+export const weatherKey = (lat: number, lon: number) => `${lat.toFixed(2)},${lon.toFixed(2)}`;
+const weatherStore = (key: string) => `madrid-transit:cache:weather:${key}`;
+
+export function storedWeather(key: string): WeatherNow | null {
+  const saved = loadJson<{ at?: number; w?: WeatherNow } | null>(weatherStore(key), null);
+  const fresh = saved?.w && Date.now() - (saved.at ?? 0) < WEATHER_STORED_MAX_MS;
+  return fresh ? (saved.w ?? null) : null;
+}
+
+async function loadWeather(key: string): Promise<WeatherNow | null> {
+  const [lat, lon] = key.split(',');
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), WEATHER_TIMEOUT_MS);
+  try {
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        '&current=temperature_2m,weather_code,is_day&timezone=Europe%2FMadrid',
+      { signal: ctl.signal },
+    );
+    const w = res.ok ? parseWeather(await res.json()) : null;
+    if (w) saveJson(weatherStore(key), { at: Date.now(), w });
+    return w ?? storedWeather(key);
+  } catch {
+    return storedWeather(key);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function fetchWeather(key: string): Promise<WeatherNow | null> {
+  const hit = weatherMemo.get(key);
+  if (hit && Date.now() - hit.at < WEATHER_MEMO_MS) return hit.p;
+  const p = loadWeather(key);
+  weatherMemo.set(key, { at: Date.now(), p });
+  // A failed fetch is not memoised: the next stop change or page show retries.
+  void p.then(w => w || weatherMemo.delete(key));
+  return p;
 }

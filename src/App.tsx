@@ -9,6 +9,7 @@ import { loadJson, saveJson } from './storage.ts';
 import Trail from './Trail.tsx';
 import { useStopNav, type Nav } from './nav.ts';
 import { InfoButton, NoDepartures, StopInfo, useInfoToggle } from './StopInfo.tsx';
+import { WeatherMark } from './Weather.tsx';
 import Alerts, { AccessMark, AlertMark, useAlertBoard } from './Alerts.tsx';
 import {
   fetchAlerts,
@@ -1128,10 +1129,13 @@ function Departures({
       )}
       <StopsRow stops={stops} selected={selected} onSelect={onSelect} />
       <Trail trail={trail} />
-      <h2 className="title">
-        {short(selected.name)} <AccessMark on={wa} />
-        <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
-      </h2>
+      <div className="title-row">
+        <h2 className="title">
+          {short(selected.name)} <AccessMark on={wa} />
+          <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
+        </h2>
+        <WeatherMark lat={info?.lat} lon={info?.lon} />
+      </div>
       {subtitle && <small className="sub">{subtitle}</small>}
       {infoOpen && tt && (
         <StopInfo

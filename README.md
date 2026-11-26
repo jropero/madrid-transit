@@ -27,6 +27,7 @@ Notes for coding agents are in [AGENTS.md](AGENTS.md).
   - Renfe: licence https://data.renfe.com/legal. Required: "Origen de los datos: Renfe Operadora", the timetable update date (`days.json.updated`, the zip's HTTP Last-Modified, else the download date; shown as "horario actualizado DD.MM") and a note that the app is unofficial and unrelated to Renfe.
   - CRTM (Metro, Metro Ligero, buses, EMT stops, towns, stop times): licence https://www.crtm.es/licencia-de-uso. Required: "Powered by CRTM" linking to http://www.crtm.es/, a note that the data is processed ("datos explotados") and that CRTM does not sponsor the app.
   - Buses (NAP feed 1361): **Powered by MITRAMS** ([transportes.gob.es](https://www.transportes.gob.es/)), required by the NAP licence. EMT live data: "Datos: EMT Madrid MobilityLabs".
+  - Weather in the stop title: [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0), credited in Settings ("Tiempo: Open-Meteo.com (CC BY 4.0)").
 - Line stops: `public/data/route/<routeId>.json` = `{ p: [[[stopId, offsetSecs], ...], ...] }`, the unique stop patterns of each route (Renfe, buses, light rail from stop_times; Metro and EMT streamed from their stop_times, calendars ignored). Timetable rows carry a pattern index. Metro interchange stations (one GTFS record per line) are merged by name within 300 m.
 
 ## Development
