@@ -900,6 +900,17 @@ p.next {
   margin-left: auto;
 }
 
+/* A CRTM timetable time before a tracked bus of the same line: maybe never comes */
+.dep.unconfirmed .time,
+.dep.unconfirmed .left {
+  opacity: 0.55;
+}
+
+.tag.unconfirmed {
+  margin-left: 0;
+  border: 1px dashed currentcolor;
+}
+
 .cancelled .time,
 .cancelled .left {
   text-decoration: line-through;

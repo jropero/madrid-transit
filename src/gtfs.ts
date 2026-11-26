@@ -91,6 +91,9 @@ export type Departure = {
   expected: Date;
   cancelled: boolean;
   live: boolean; // from CRTM times or a GTFS-RT trip update, not the static timetable
+  // A CRTM timetable time (no estimate) before a tracked bus of the same line and destination:
+  // CRTM lost that bus, or the tracked one is it running late (shown as "no confirmado").
+  unconfirmed?: boolean;
   distM?: number; // EMT only: distance of the bus to the stop, metres
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
 };
@@ -961,33 +964,44 @@ function crtmSpans(rows: CrtmRow[], heads: Map<string, Set<string>>): Map<string
   return spans;
 }
 
-// The timetable row planned nearest to `t` (the earlier one on a tie), or undefined.
-const nearestPlanned = (rows: Departure[], t: number) =>
-  rows.reduce<Departure | undefined>((best, d) => {
-    const gap = Math.abs(d.planned.getTime() - t);
-    return !best || gap < Math.abs(best.planned.getTime() - t) ? d : best;
-  }, undefined);
+// A live row claims a timetable run at most this far from it; further away it is an extra bus.
+const CLAIM_MAX_MS = 20 * 60_000;
+
+// Live time -> timetable run pairs within CLAIM_MAX_MS, closest first (earlier run on a tie).
+function claimPairs(rows: Departure[], live: number[]) {
+  const pairs = live.flatMap((t, li) =>
+    rows.map(d => ({ li, d, gap: Math.abs(d.planned.getTime() - t) })),
+  );
+  return pairs
+    .filter(p => p.gap <= CLAIM_MAX_MS)
+    .sort((a, b) => a.gap - b.gap || a.d.planned.getTime() - b.d.planned.getTime());
+}
+
+// Each live time claims at most one run and each run is claimed once, best matches first, so
+// CRTM's own 16:00:00 takes the 16:00 run before an estimate of 15:55:35 can.
+function claimedRuns(rows: Departure[], live: number[]): Set<Departure> {
+  const claimed = new Set<Departure>();
+  const used = new Set<number>();
+  for (const { li, d } of claimPairs(rows, live)) {
+    if (used.has(li) || claimed.has(d)) continue;
+    used.add(li);
+    claimed.add(d);
+  }
+  return claimed;
+}
 
 // CRTM times are rounded to the whole minute, so a live row at hh:mm stands for timetable
 // times up to hh:mm:59.
 const CRTM_PRECISION_MS = 59_000;
 
 // Timetable rows of one covered route (and direction) that its live rows replace: everything
-// planned up to the latest live time (gone, or running late as one of the live buses), plus,
-// for each live bus in time order, the not yet claimed timetable row planned nearest to it (a
-// bus 4 min early takes its own later slot instead of leaving it as a phantom departure).
+// planned up to the latest live time (gone, or running late as one of the live buses), plus
+// the runs the live rows claim (claimedRuns: a bus 4 min early takes its own later slot instead
+// of leaving it as a phantom departure; nothing further than CLAIM_MAX_MS away).
 function replacedByLive(rows: Departure[], live: number[]): Departure[] {
   const last = live.at(-1) ?? -Infinity;
   const out = new Set(rows.filter(d => d.planned.getTime() <= last + CRTM_PRECISION_MS));
-  const claimed = new Set<Departure>();
-  for (const t of live) {
-    const d = nearestPlanned(
-      rows.filter(x => !claimed.has(x)),
-      t,
-    );
-    if (d) claimed.add(d);
-  }
-  return [...out, ...claimed];
+  return [...out, ...claimedRuns(rows, live)];
 }
 
 // Merge rule: a route is covered by CRTM only if it has a row in [now - 1 min, now + 2 h]. A
@@ -1016,8 +1030,18 @@ export function mergeCrtm(
     const own = planned.filter(d => d.routeId === routeId && (!head || d.dest === head));
     for (const d of replacedByLive(own, live)) dropped.add(d);
   }
-  const live = inWindow.map((r, i) => crtmDeparture(r, i, routes));
+  const live = markUnconfirmed(inWindow.map((r, i) => crtmDeparture(r, i, routes)));
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
+}
+
+// CRTM rows not live (timetable times) with a live row of the same route and destination after
+// them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked 15:55:35).
+function markUnconfirmed(crtm: Departure[]): Departure[] {
+  const trackedLater = (d: Departure) =>
+    crtm.some(
+      o => o.live && o.routeId === d.routeId && o.dest === d.dest && o.expected > d.expected,
+    );
+  return crtm.map(d => (!d.live && trackedLater(d) ? { ...d, unconfirmed: true } : d));
 }
 
 console.assert(
@@ -1156,6 +1180,30 @@ console.assert(
     const d = mergeCrtm(plan('14:40:00', '15:10:00'), [row(at('22:34:00'))], {}, now);
     // Another route stays untouched.
     const e = mergeCrtm([dep(at('14:50:00'), 'B')], [row(at('14:52:00'))], {}, now);
+    // (g) stop 16578, line 1 at 15:30: the CRTM timetable time 15:39 before the tracked 15:55
+    // is unconfirmed; 16:00 (after it) and other lines are not.
+    const sched = (h: string, routeId = 'A'): CrtmRow => ({
+      ...row(at(h)),
+      routeId,
+      scheduled: true,
+    });
+    const g = mergeCrtm(
+      [],
+      [sched('15:39:00'), row(at('15:55:35')), sched('16:00:00'), sched('15:40:00', 'B')],
+      {},
+      new Date(at('15:30:00')),
+    );
+    const flags = g.map(
+      d => `${d.expected.toISOString().slice(11, 16)}${d.unconfirmed ? '?' : ''}`,
+    );
+    // (h) same moment with the timetable: 15:39 and 16:00 are CRTM's own, the 15:55 estimate is
+    // an extra bus (no run within 20 min left), so the 16:21 run stays.
+    const h = mergeCrtm(
+      plan('15:39:00', '16:00:00', '16:21:00'),
+      [sched('15:39:00'), row(at('15:55:35')), sched('16:00:00')],
+      {},
+      new Date(at('15:30:00')),
+    );
     // (f) stop 16578, line 1 at 14:46: live 14:54 is the 14:58 bus early, not the 14:38 one 16 min
     // late; no phantom 14:58 is left (14:38 is past the last live time and goes too).
     const f = mergeCrtm(
@@ -1170,10 +1218,12 @@ console.assert(
       show(c) === '14:40L 14:41L 15:10' &&
       show(d) === '14:40 15:10' &&
       show(e) === '14:50 14:52L' &&
-      show(f) === '14:54L 15:18'
+      show(f) === '14:54L 15:18' &&
+      flags.join(' ') === '15:39? 15:40 15:55 16:00' &&
+      show(h) === '15:39 15:55L 16:00 16:21'
     );
   })(),
-  'mergeCrtm: live rows replace their timetable slots (late, early, nearest, several), far-future keeps it',
+  'mergeCrtm: live rows replace their timetable slots (late, early, nearest, several), far-future keeps it, unconfirmed marks',
 );
 console.assert(
   (() => {
