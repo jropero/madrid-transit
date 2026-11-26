@@ -2164,20 +2164,33 @@ console.assert(
 
 // ---------------------------------------------------------------- CRTM direction assignment
 
-// A timetable direction of a route at this stop: its headsign and the route patterns it uses.
-export type Direction = { head: string; pis: number[] };
+// A timetable direction of a route at this stop: its headsign, the route patterns it uses and
+// (when asked for a date) its planned departures around that date, in epoch ms.
+export type Direction = { head: string; pis: number[]; times: number[] };
 
-// Distinct directions (headsigns) of `routeId` in this stop's timetable file.
-export function stopDirections(file: BusFile, routeId: string): Direction[] {
+// Planned departures (ms) of one file row on the service days yesterday..tomorrow of `around`.
+function rowTimes(file: BusFile, row: BusFile['d'][number], around: Date): number[] {
+  const cal = file.c[row[1]];
+  if (!cal) return [];
+  const today = madridDate(around);
+  return [shiftDay(today, -1), today, shiftDay(today, 1)]
+    .filter(day => busActive(cal, day))
+    .map(day => madridTime(day, row[0]).getTime());
+}
+
+// Distinct directions (headsigns) of `routeId` in this stop's timetable file; `around` fills
+// `times` (else empty).
+export function stopDirections(file: BusFile, routeId: string, around?: Date): Direction[] {
   const ri = file.r.indexOf(routeId);
-  const byHead = new Map<string, Set<number>>();
-  for (const [, , r, h, pi] of file.d) {
-    if (r !== ri) continue;
-    const pis = byHead.get(file.h[h]) ?? new Set<number>();
-    if (pi !== undefined) pis.add(pi);
-    byHead.set(file.h[h], pis);
+  const byHead = new Map<string, Direction>();
+  for (const row of file.d.filter(row => row[2] === ri)) {
+    const [, , , h, pi] = row;
+    const d = byHead.get(file.h[h]) ?? { head: file.h[h], pis: [], times: [] };
+    d.pis.push(...(pi === undefined || d.pis.includes(pi) ? [] : [pi]));
+    d.times.push(...(around ? rowTimes(file, row, around) : []));
+    byHead.set(file.h[h], d);
   }
-  return [...byHead].map(([head, pis]) => ({ head, pis: [...pis] }));
+  return [...byHead.values()];
 }
 
 // Words that tell nothing about a destination ("VENUS NORTE" and "VENUS SUR" are one place).
@@ -2191,10 +2204,32 @@ const sharedWords = (a: string, b: string) => {
   return nameWords(a).filter(w => y.includes(w)).length;
 };
 
-// The direction with the strictly highest positive score, else undefined (tie or none).
-function uniqueBest(dirs: Direction[], score: (d: Direction) => number): Direction | undefined {
-  const scored = dirs.map(d => ({ d, s: score(d) })).sort((a, b) => b.s - a.s);
-  return scored[0].s > 0 && scored[0].s !== scored[1]?.s ? scored[0].d : undefined;
+// The directions sharing the highest positive score (empty when none scores).
+function topScored(dirs: Direction[], score: (d: Direction) => number): Direction[] {
+  const scored = dirs.map(d => ({ d, s: score(d) }));
+  const best = Math.max(...scored.map(x => x.s));
+  return best > 0 ? scored.filter(x => x.s === best).map(x => x.d) : [];
+}
+
+// Live times within this many minutes of a planned departure count as that departure.
+const TIME_MATCH_MIN = 20;
+// Closeness of the live time to the direction's nearest planned departure (0 = none near).
+const timeScore = (when: Date) => (d: Direction) =>
+  Math.max(
+    0,
+    TIME_MATCH_MIN - Math.min(...d.times.map(t => Math.abs(t - when.getTime()) / 60_000)),
+  );
+
+// The single top-scoring direction; a tie is broken by the nearest planned time.
+function uniqueBest(
+  dirs: Direction[],
+  score: (d: Direction) => number,
+  when: Date,
+): Direction | undefined {
+  const top = topScored(dirs, score);
+  if (top.length < 2) return top[0];
+  const near = topScored(top, timeScore(when));
+  return near.length === 1 ? near[0] : undefined;
 }
 
 type DirCtx = {
@@ -2212,13 +2247,17 @@ const anyPattern = (c: DirCtx, d: Direction, test: (p: Pattern) => boolean) =>
   d.pis.some(pi => !!c.patterns[pi] && test(c.patterns[pi])) ? 1 : 0;
 
 // Rules in order: the destination is a direction's last stop; its headsign shares significant
-// words with the destination text; the destination is somewhere after this stop. (Names in the
-// tail come last: on a circular line both directions pass both ends.)
+// words with the destination text; the destination is somewhere after this stop; a planned
+// departure of the direction is near the live time (CRTM sometimes names a stop that no pattern
+// has). (Names in the tail come late: on a circular line both directions pass both ends.)
+// Variants ending at the same stop ("PINTO", "PINTO (por ctra. A-42)") tie on the name rules;
+// the nearest planned time breaks the tie.
 const directionRules: ((c: DirCtx) => (d: Direction) => number)[] = [
   c => d => anyPattern(c, d, p => isDest(c, p.at(-1)?.[0] ?? '')),
   c => d => sharedWords(c.row.dest, d.head),
   c => d =>
     anyPattern(c, d, p => p.slice(stopIndex(p, c.stopId) + 1).some(([id]) => isDest(c, id))),
+  c => timeScore(c.row.when),
 ];
 
 // Timetable direction a live row belongs to, or undefined when unknown or ambiguous. One
@@ -2226,7 +2265,7 @@ const directionRules: ((c: DirCtx) => (d: Direction) => number)[] = [
 export function directionOf(c: DirCtx, dirs: Direction[]): Direction | undefined {
   if (dirs.length < 2) return dirs[0];
   for (const rule of directionRules) {
-    const d = uniqueBest(dirs, rule(c));
+    const d = uniqueBest(dirs, rule(c), c.row.when);
     if (d) return d;
   }
   return undefined;
@@ -2243,7 +2282,7 @@ export function assignDirections(
 ): CrtmRow[] {
   const cache = new Map<string, Direction[]>();
   const dirsOf = (id: string) => {
-    const dirs = cache.get(id) ?? stopDirections(file, id);
+    const dirs = cache.get(id) ?? stopDirections(file, id, rows[0]?.when);
     cache.set(id, dirs);
     return dirs;
   };
@@ -2335,6 +2374,54 @@ console.assert(
     );
   })(),
   'assignDirections: ML4 words match, single direction takes headsign, unmatched keeps CRTM text, per-direction replacement',
+);
+
+console.assert(
+  (() => {
+    // Line 471 at Parla: two variants end at the same stop; line 463: CRTM names a stop no
+    // pattern has. 2026-11-26 is a Thursday; 10:47 / 11:07 Madrid = 09:47 / 10:07 UTC.
+    const p: Pattern = [
+      ['s', 0],
+      ['end', 60],
+    ];
+    const file: BusFile = {
+      kind: 'bus',
+      r: ['L'],
+      h: ['PINTO', 'PINTO (por ctra. A-42)'],
+      c: [[0b1111111, 20260101, 20261231, [], []]],
+      d: [
+        [10 * 3600 + 47 * 60, 0, 0, 0, 0],
+        [11 * 3600 + 7 * 60, 0, 0, 1, 0],
+      ],
+    };
+    const row = (dest: string, iso: string): CrtmRow => ({
+      when: new Date(iso),
+      routeId: 'L',
+      line: 'L',
+      dest,
+      tram: false,
+      metro: false,
+      issue: '1',
+    });
+    const nameOf = (id: string) => (id === 'end' ? 'SUR-POLIDEPORTIVO' : 'X');
+    const out = assignDirections(
+      [
+        row('SUR-POLIDEPORTIVO', '2026-11-26T09:48:00Z'),
+        row('AV.PRINCESA JUANA AUSTRIA', '2026-11-26T10:06:00Z'),
+        row('AV.PRINCESA JUANA AUSTRIA', '2026-11-26T15:00:00Z'),
+      ],
+      file,
+      's',
+      { L: [p] },
+      nameOf,
+    );
+    return (
+      out[0].dest === 'PINTO' &&
+      out[1].dest === 'PINTO (por ctra. A-42)' &&
+      out[2].dest === 'AV.PRINCESA JUANA AUSTRIA'
+    );
+  })(),
+  'assignDirections: nearest planned time breaks ties and matches unknown destinations',
 );
 
 // ---------------------------------------------------------------- Stop info and terminus text
