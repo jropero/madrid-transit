@@ -74,7 +74,13 @@ type Core = {
 };
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const setDrag = (el: HTMLElement, px: number) => el.style.setProperty('--drag', `${px}px`);
+// The drag offset and state classes live on the panes' parent (the app), so the header row
+// can follow the finger too (`.views-row` reads `--drag`).
+const hostOf = (el: HTMLElement) => el.parentElement ?? el;
+const setDrag = (el: HTMLElement, px: number) =>
+  hostOf(el).style.setProperty('--drag', `${px}px`);
+const isPaneMove = (e: TransitionEvent) =>
+  e.propertyName === 'transform' && e.target instanceof Element && e.target.matches('.pane');
 const noSwipe = (t: EventTarget) =>
   t instanceof Element && !!t.closest('input, textarea, select, [data-no-swipe]');
 
@@ -90,6 +96,14 @@ function classify(g: Gesture, dx: number, dy: number): 'wait' | 'lock' | 'drop' 
   if (Math.abs(dx) > LOCK_PX && Math.abs(dx) > Math.abs(dy) * LOCK_RATIO) return 'lock';
   return Math.abs(dy) > LOCK_PX && !g.horizontal ? 'drop' : 'wait';
 }
+
+// Pointer handlers for every element a pivot swipe can start on (header and panes).
+export type PivotDrag = {
+  onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
+  onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
+  onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;
+  onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => void;
+};
 
 export function usePivot<V extends string>(
   views: readonly V[],
@@ -120,17 +134,18 @@ export function usePivot<V extends string>(
       core.current.end = null;
       el.removeEventListener('transitionend', onEnd);
       clearTimeout(timer);
-      el.classList.remove('settling');
+      hostOf(el).classList.remove('settling');
       setDrag(el, 0);
       if (dir) commit(neighbour(dir));
       void el.offsetWidth; // apply the new slots without a transition
     };
-    const onEnd = (e: TransitionEvent) => e.target === e.currentTarget && finish();
+    // transitionend bubbles up from the panes (the ones that move).
+    const onEnd = (e: TransitionEvent) => isPaneMove(e) && finish();
     const timer = setTimeout(finish, SETTLE_MS + 60);
     core.current.end = finish;
     if (reducedMotion()) return finish();
     el.addEventListener('transitionend', onEnd);
-    el.classList.add('settling');
+    hostOf(el).classList.add('settling');
     setDrag(el, -dir * el.clientWidth);
   };
 
@@ -143,7 +158,7 @@ export function usePivot<V extends string>(
     setTurning(v);
   };
 
-  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+  const onPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
     const c = core.current;
     if (c.end || e.button > 0 || noSwipe(e.target)) return;
     c.g = {
@@ -158,17 +173,14 @@ export function usePivot<V extends string>(
     };
   };
 
-  const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+  const onPointerMove = (e: ReactPointerEvent<HTMLElement>) => {
     const g = core.current.g;
     const el = ref.current;
     if (!g || !el || g.id !== e.pointerId) return;
     const dx = e.clientX - g.x;
     const verdict = classify(g, dx, e.clientY - g.y);
     if (verdict === 'drop') core.current.g = null;
-    if (verdict === 'lock' && !g.horizontal) {
-      g.horizontal = true;
-      el.setPointerCapture(e.pointerId);
-    }
+    if (verdict === 'lock' && !g.horizontal) lock(el, g, e.pointerId);
     if (!g.horizontal) return;
     const dt = Math.max(1, e.timeStamp - g.lastT);
     g.vel = (e.clientX - g.lastX) / dt;
@@ -178,20 +190,32 @@ export function usePivot<V extends string>(
     setDrag(el, g.dx);
   };
 
-  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+  // A horizontal drag from the header or the panes: the panes take the pointer (so a drag that
+  // began on a header button never clicks it) and nothing gets text-selected on the way.
+  const lock = (el: HTMLElement, g: Gesture, pointerId: number) => {
+    g.horizontal = true;
+    el.setPointerCapture(pointerId);
+    hostOf(el).classList.add('dragging');
+    getSelection()?.removeAllRanges();
+  };
+  const unlock = (el: HTMLElement | null) => el && hostOf(el).classList.remove('dragging');
+
+  const onPointerUp = (e: ReactPointerEvent<HTMLElement>) => {
     const g = core.current.g;
     const el = ref.current;
     if (!g || !el || g.id !== e.pointerId) return;
     core.current.g = null;
+    unlock(el);
     if (!g.horizontal) return;
     if (e.pointerType === 'mouse') swallowNextClick(el);
     settle(releaseTarget(g.dx, el.clientWidth, g.vel));
   };
 
-  const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+  const onPointerCancel = (e: ReactPointerEvent<HTMLElement>) => {
     const g = core.current.g;
     if (!g || g.id !== e.pointerId) return;
     core.current.g = null;
+    unlock(ref.current);
     if (g.horizontal) settle(0);
   };
 
@@ -251,6 +275,6 @@ export function usePivot<V extends string>(
     goTo,
     paneStyle,
     paneIn,
-    drag: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel },
+    drag: { onPointerDown, onPointerMove, onPointerUp, onPointerCancel } satisfies PivotDrag,
   };
 }

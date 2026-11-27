@@ -120,6 +120,8 @@ button {
 .views {
   overflow: hidden;
   padding-left: var(--gutter);
+  touch-action: pan-y;
+  user-select: none;
 }
 
 .views-row {
@@ -128,6 +130,9 @@ button {
   gap: 24px;
   width: max-content;
   animation: pivot-slide 200ms ease-out;
+
+  /* follows a pivot drag at half speed, like the Windows Phone headers */
+  transform: translateX(calc(var(--drag, 0px) / 2));
 }
 
 @keyframes pivot-slide {
@@ -161,8 +166,15 @@ button {
   overscroll-behavior-x: none;
 }
 
-.panes.settling .pane {
+/* --drag, .settling and .dragging are set on .app by src/pivot.ts */
+.settling .pane,
+.settling .views-row {
   transition: transform 250ms ease-out;
+}
+
+.dragging,
+.dragging * {
+  user-select: none;
 }
 
 .pane {
@@ -782,7 +794,8 @@ p.next {
   .dest .live::before,
   .toast span,
   .turn,
-  .panes.settling .pane,
+  .settling .pane,
+  .settling .views-row,
   .bar-menu,
   .views-row,
   .scan-chip.checking {

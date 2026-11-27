@@ -11,7 +11,7 @@ import {
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
-import { usePivot } from './pivot.ts';
+import { usePivot, type PivotDrag } from './pivot.ts';
 import AlertsTab from './AlertsTab.tsx';
 import LineTab, { useLineScan } from './LineScan.tsx';
 import Settings from './Settings.tsx';
@@ -1319,7 +1319,15 @@ const usePivotViews = () =>
 
 // Big lowercase headers, looping like a Windows Phone pivot: the active one comes first,
 // the rest follow in order and wrap around.
-function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => void }) {
+function PivotHeader({
+  view,
+  onSelect,
+  drag,
+}: {
+  view: View;
+  onSelect: (v: View) => void;
+  drag: PivotDrag; // the header swipes the panes too
+}) {
   const row = useRef<HTMLDivElement>(null);
   const refocus = useRef(false);
   const i = VIEWS.indexOf(view);
@@ -1341,7 +1349,7 @@ function PivotHeader({ view, onSelect }: { view: View; onSelect: (v: View) => vo
   };
 
   return (
-    <nav className="views" aria-label="Vistas">
+    <nav className="views" aria-label="Vistas" {...drag}>
       <div className="views-row" key={view} ref={row}>
         {order.map(v => (
           <button
@@ -1447,7 +1455,7 @@ export default function App() {
   return (
     <main className="app">
       <p className="brand">Madrid Transit</p>
-      <PivotHeader view={view} onSelect={goTo} />
+      <PivotHeader view={view} onSelect={goTo} drag={drag} />
       <div className="panes" ref={ref} {...drag}>
         {pane(
           'departures',
