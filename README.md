@@ -6,8 +6,10 @@ Next Renfe Cercanías, interurban bus and light rail (Metro Ligero, Tranvía de 
 
 - **Departures:** the next 2 hours for a stop, grouped by line and destination, with Cercanías line colours, minutes left, `+N'` delay, cancelled departures struck through and step-free boarding (♿).
 - **Service alerts:** active Renfe alerts for Madrid lines as a banner and a ⚠ on affected lines (Spanish, as supplied).
+- **Alertas tab:** every alert for the selected stop and the stops within 500 m (or around you with "cerca de mí"), shown in full and split by source: Renfe (lines of the nearby stations), EMT (incidents of the 6 nearest EMT stops) and CRTM (the network-wide Avisos notices for interurban buses, Metro Ligero and Metro).
+- **Escáner tab (line scan):** for a bus or light-rail stop without live CRTM times, checks the earlier stops of a line, nearest first, until one has a live bus, and projects its time onto this stop. The estimate shows on salidas as "estimado" and follows the bus every 30 s.
 - **Light rail (CRTM):** Metro Ligero ML1-ML3 and Tranvía de Parla ML4 (57 stops, 4 lines), **timetable only**. Tiles say "tranvía"; search shows the town.
-- **Interurban buses (CRTM):** ~6,600 stops and 354 lines from the national NAP feed. Timetable plus CRTM stop times (see Data sources); no alerts for buses (Renfe stops keep delays and alerts). Search shows the stop code and street to tell the two sides of a road apart.
+- **Interurban buses (CRTM):** ~6,600 stops and 354 lines from the national NAP feed. Timetable plus CRTM stop times (see Data sources); bus alerts only as CRTM's network-wide notices in the alertas tab. Search shows the stop code and street to tell the two sides of a road apart.
 - **Saved stops:** Atocha and Sol are preset. Add stops by name or stop code search (accent-insensitive) or **near me**.
 - **Offline:** the timetable is local, so departures work fully offline; the last live data is kept.
 - **Metro UI:** swipe pivot, app bar, tilt on press, light or dark theme (automatic by default, switchable in settings), 20 accent colours, Selawik font, Fluent icons.
@@ -22,17 +24,18 @@ Notes for coding agents are in [AGENTS.md](AGENTS.md).
 - Light rail: CRTM "GTFS Red de Metro Ligero", public ArcGIS item `https://www.arcgis.com/sharing/rest/content/items/aaed26cc0ff64b0c947ac0bc3e033196/data` (417 KB, no key), cached in `.cache/ml.zip` for 24 h; same pipeline as buses. Licence: https://www.crtm.es/licencia-de-uso. Its towns come from layer `M10_Red` (cached in `.cache/crtm-m10.json`); stop codes collide with bus codes, so each feed only uses its own layer.
 - Towns: CRTM open data (datos.crtm.es), ArcGIS layer `M8_Red` (`https://services5.arcgis.com/UxADft6QPcvFyDU1/arcgis/rest/services/M8_Red/FeatureServer/0`, no auth): `CODIGOESTACION` equals the GTFS `stop_code`, province + municipality code give the INE code, resolved to a name through `scripts/municipios.json` (Wikidata). Cached in `.cache/crtm-stops.json` for 7 days; if the fetch fails, `pnpm data` warns and builds without towns. Renfe stations take the town of the nearest bus stop within 1,500 m. Search matches the town and results show it.
 - Live (Renfe only): GTFS-Realtime JSON `https://gtfsrt.renfe.com/trip_updates.json` and `alerts.json` (no auth, no CORS), reached through `public/rt.php`.
+- CRTM notices (alertas tab): the CRTM website's Avisos pages `https://www.crtm.es/comunicacion/actualidad-del-servicio/avisos/avisos-<interurbanos|metro|metro-ligero>/` (HTML, no auth, no CORS; requests need a User-Agent or they get 403), scraped through `public/rt.php` (`?f=crtm_avisos&m=…`, only the notices block is kept, 10 min cache). Hand-edited pages: the markup may change, and notices are network-wide, not per stop or line.
 - Bus and light-rail stop times: CRTM website endpoint `https://www.crtm.es/widgets/api/GetStopsTimes.php?codStop=<8|10>_<code>&type=1&orderBy=2&stopTimesByIti=3` (no auth, no CORS). It is **undocumented** and may change or break without notice; the timetable is the fallback. Reached through `public/rt.php` (`?f=crtm&stop=…`, stop validated against the generated allow-list `rt-stops.php`, 30 s cache per stop). Lines absent from the answer keep their timetable times.
 - Data and licences (also shown in Settings, in Spanish):
   - Renfe: licence https://data.renfe.com/legal. Required: "Origen de los datos: Renfe Operadora", the timetable update date (`days.json.updated`, the zip's HTTP Last-Modified, else the download date; shown as "horario actualizado DD.MM") and a note that the app is unofficial and unrelated to Renfe.
-  - CRTM (Metro, Metro Ligero, buses, EMT stops, towns, stop times): licence https://www.crtm.es/licencia-de-uso. Required: "Powered by CRTM" linking to http://www.crtm.es/, a note that the data is processed ("datos explotados") and that CRTM does not sponsor the app.
+  - CRTM (Metro, Metro Ligero, buses, EMT stops, towns, stop times, notices): licence https://www.crtm.es/licencia-de-uso. Required: "Powered by CRTM" linking to http://www.crtm.es/, a note that the data is processed ("datos explotados") and that CRTM does not sponsor the app.
   - Buses (NAP feed 1361): **Powered by MITRAMS** ([transportes.gob.es](https://www.transportes.gob.es/)), required by the NAP licence. EMT live data: "Datos: EMT Madrid MobilityLabs".
   - Weather in the stop title: [Open-Meteo.com](https://open-meteo.com/) (CC BY 4.0), credited in Settings ("Tiempo: Open-Meteo.com (CC BY 4.0)").
 - Line stops: `public/data/route/<routeId>.json` = `{ p: [[[stopId, offsetSecs], ...], ...] }`, the unique stop patterns of each route (Renfe, buses, light rail from stop_times; Metro and EMT streamed from their stop_times, calendars ignored). Timetable rows carry a pattern index. Metro interchange stations (one GTFS record per line) are merged by name within 300 m.
 
 ## Development
 
-`pnpm install`, then `pnpm dev` (runs on http://localhost:5173/m/). The first build or `pnpm data` downloads the 16 MB Renfe zip (and, with `NAP_TOKEN` set, the 74 MB bus zip) into `.cache/`. The dev server proxies `/m/rt.php` to Renfe and CRTM.
+`pnpm install`, then `pnpm dev` (runs on http://localhost:5173/m/). The first build or `pnpm data` downloads the 16 MB Renfe zip (and, with `NAP_TOKEN` set, the 74 MB bus zip) into `.cache/`. The dev server proxies `/m/rt.php` to Renfe and CRTM (CRTM notices through a small middleware in `vite.config.ts`).
 
 ## Deployment
 
@@ -53,10 +56,6 @@ One-time setup:
 3. Copy the ED25519 "Huella digital de la clave del host" from hPanel → SSH Access and run `gh variable set SSH_HOST_FP --body 'SHA256:…'`. The deploy pins the host key to this fingerprint. Then connect once to check: `ssh -i ~/.ssh/madrid_deploy -p <port> <user>@<host> 'ls domains/ekult.co.uk/public_html'`.
 4. In this repo: `gh secret set NAP_TOKEN`, `gh secret set SSH_HOST`, `gh secret set SSH_PORT`, `gh secret set SSH_USER`, `gh secret set SSH_KEY < ~/.ssh/madrid_deploy`, `gh variable set DEPLOY_PATH --body '/home/<user>/domains/ekult.co.uk/public_html/m'`.
 5. The old `SSH_KNOWN_HOSTS` secret is no longer used; delete it with `gh secret delete SSH_KNOWN_HOSTS`.
-
-## Not built
-
-- EMT city buses via MobilityLabs: log in with email + password headers (legacy X-ClientId + passKey as fallback) inside `rt.php` (`?f=emt&stop=…`). Keep the credentials in a config file outside the webroot, never in the bundle or repo.
 
 ## EMT city buses
 

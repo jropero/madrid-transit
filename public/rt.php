@@ -706,7 +706,8 @@ function avisos_refresh(string $url, string $cache, string $neg): void {
         }
         return;
     }
-    $ctx = stream_context_create(['http' => ['timeout' => http_timeout(), 'header' => "Accept: text/html\r\n"]]);
+    // crtm.es answers 403 to requests without a User-Agent (PHP sends none by default).
+    $ctx = stream_context_create(['http' => ['timeout' => http_timeout(), 'header' => "Accept: text/html\r\nUser-Agent: madrid-transit/1.0\r\n"]]);
     $t0 = microtime(true);
     $page = @file_get_contents($url, false, $ctx, 0, 1048576);
     $status = 0;
