@@ -69,6 +69,7 @@ jobs:
           check 'f=x' 400
           check 'f=crtm&stop=8_999999999' 400
           check 'f=crtm&stop=8_0' 404
+          check 'f=crtm_avisos&m=x' 400
           check 'f=emt&stop=0' 404
           # The debug log answers without any upstream call: a JSON array.
           check 'f=crtm&stop=8_16578&log=1' 200

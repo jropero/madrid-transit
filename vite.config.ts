@@ -1,5 +1,49 @@
 import { defineConfig } from 'vite-plus';
 import react from '@vitejs/plugin-react';
+import type { Plugin } from 'vite-plus';
+import { avisosBlock } from './scripts/avisos-block.mjs';
+
+const AVISOS_MODES = ['interurbanos', 'metro', 'metro-ligero'];
+
+// Dev stand-in for rt.php's `f=crtm_avisos&m=<mode>`: fetches the CRTM page and answers
+// {html, at} like production (mode validated against the same list, errors are 502).
+type DevReq = { url?: string };
+type DevRes = {
+  statusCode: number;
+  setHeader(k: string, v: string): void;
+  end(b: string): void;
+};
+
+async function serveAvisos(req: DevReq, res: DevRes, next: () => void) {
+  const q = new URL(req.url ?? '', 'http://x').searchParams;
+  if (q.get('f') !== 'crtm_avisos') return next();
+  const mode = q.get('m') ?? '';
+  const send = (code: number, type: string, body: string) => {
+    res.statusCode = code;
+    res.setHeader('Content-Type', type);
+    res.end(body);
+  };
+  if (!AVISOS_MODES.includes(mode)) return send(400, 'text/plain', 'bad mode');
+  try {
+    const url = `https://www.crtm.es/comunicacion/actualidad-del-servicio/avisos/avisos-${mode}/`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+    const html = r.ok ? avisosBlock(await r.text()) : null;
+    if (html === null) return send(502, 'text/plain', 'upstream unavailable');
+    send(200, 'application/json', JSON.stringify({ html, at: Math.floor(Date.now() / 1000) }));
+  } catch {
+    send(502, 'text/plain', 'upstream unavailable');
+  }
+}
+
+const avisosDev = (): Plugin => ({
+  name: 'crtm-avisos-dev',
+  configureServer(server) {
+    // The cast: the Connect handler types come from node typings this project does not load.
+    const handler = (req: DevReq, res: DevRes, next: () => void) =>
+      void serveAvisos(req, res, next);
+    server.middlewares.use('/m/rt.php', handler as never);
+  },
+});
 
 // The validated `stop` of a /m/rt.php?f=crtm request (same pattern as rt.php), else ''.
 const crtmStop = (path: string) => {
@@ -20,7 +64,7 @@ const emtStop = (path: string) => {
 export default defineConfig({
   // Absolute base: relative paths break PWA manifest scope/icon resolution under /m/.
   base: '/m/',
-  plugins: [react()],
+  plugins: [react(), avisosDev()],
   server: {
     proxy: {
       // EMT needs credentials that only exist on the server: dev forwards to the deployed rt.php.

@@ -1436,6 +1436,42 @@ export function parseEmtIncidents(json: EmtJson | null, now: Date): Alert[] {
     .map(a => ({ ...a, when: validityLine(a, now) }));
 }
 
+// Incidents of several EMT stops as one list: the same id or text counts once, with every
+// stop label it was seen at (in the order given).
+export function mergeIncidents(
+  perStop: { stop: string; alerts: Alert[] }[],
+): { alert: Alert; seen: string[] }[] {
+  const byKey = new Map<string, { alert: Alert; seen: string[] }>();
+  const out: { alert: Alert; seen: string[] }[] = [];
+  const add = (stop: string, alert: Alert) => {
+    const keys = [`id:${alert.id}`, `text:${textKey(alert)}`];
+    const entry = keys.map(k => byKey.get(k)).find(Boolean) ?? { alert, seen: [] };
+    if (!out.includes(entry)) out.push(entry);
+    if (!entry.seen.includes(stop)) entry.seen.push(stop);
+    keys.forEach(k => byKey.set(k, entry));
+  };
+  perStop.forEach(({ stop, alerts }) => alerts.forEach(a => add(stop, a)));
+  return out;
+}
+console.assert(
+  (() => {
+    const al = (id: string, text: string): Alert => ({
+      id,
+      routeIds: [],
+      title: text,
+      text,
+      from: null,
+    });
+    const m = mergeIncidents([
+      { stop: 'A', alerts: [al('1', 'Obras  en la calle')] },
+      { stop: 'B', alerts: [al('2', 'obras en la calle'), al('3', 'otro')] },
+      { stop: 'C', alerts: [al('1', 'x')] },
+    ]);
+    return m.length === 2 && m[0].seen.join() === 'A,B,C' && m[1].seen.join() === 'B';
+  })(),
+  'mergeIncidents dedupes by id and text',
+);
+
 const dm = (d: Date) => {
   const p = parts(d);
   return `${p.d}/${pad(p.mo)}`;
@@ -1932,6 +1968,45 @@ export const nearStops = (stops: Stop[], here: { lat: number; lon: number }): Ne
     .sort((a, b) => a.dist - b.dist)
     .slice(0, 10);
 
+// An alert's text without its title when the text repeats it first (EMT: title + description).
+export const bodyOf = (a: { title: string; text: string }) =>
+  a.text.startsWith(a.title) ? a.text.slice(a.title.length).trim() : a.text;
+console.assert(
+  bodyOf({ title: 'Obras', text: 'Obras Desde el 12' }) === 'Desde el 12' &&
+    bodyOf({ title: 'Obras', text: 'Obras' }) === '' &&
+    bodyOf({ title: 'X', text: 'Y' }) === 'Y',
+  'bodyOf drops a repeated title',
+);
+
+// Every stop within `radius` metres of a point, nearest first (no cap, unlike `nearStops`).
+export const AREA_RADIUS = 500;
+export const stopsWithin = (
+  stops: Stop[],
+  at: { lat: number; lon: number },
+  radius = AREA_RADIUS,
+): NearStop[] =>
+  stops
+    .map(s => ({ ...s, dist: metres(at, s) }))
+    .filter(s => s.dist <= radius)
+    .sort((a, b) => a.dist - b.dist);
+console.assert(
+  (() => {
+    const mk = (id: string, lat: number): Stop => ({
+      id,
+      name: id,
+      lat,
+      lon: -3.69,
+      wa: false,
+    });
+    const r = stopsWithin([mk('far', 40.42), mk('b', 40.404), mk('a', 40.4), mk('c', 40.4)], {
+      lat: 40.4,
+      lon: -3.69,
+    });
+    return r.map(s => s.id).join() === 'a,c,b';
+  })(),
+  'stopsWithin: within 500 m, nearest first',
+);
+
 export const locate = () =>
   new Promise<{ lat: number; lon: number }>((resolve, reject) => {
     if (!navigator.geolocation)
@@ -2182,7 +2257,6 @@ const stopsAfter = (p: Pattern, stopId: string) => {
 
 // Line scan: a bus stop with no live CRTM times borrows the nearest earlier stop of the line
 // that has a live bus and projects that bus's time forward with the pattern's offsets.
-export const SCAN_MAX = 12;
 export type LineOption = { routeId: string; head: string; pi: number };
 export type ScanStop = { id: string; off: number };
 
@@ -2208,9 +2282,9 @@ export function lineOptions(file: BusFile): LineOption[] {
     .sort((a, b) => a.routeId.localeCompare(b.routeId, 'es', { numeric: true }));
 }
 
-// The stops before `stopId` in the pattern, nearest first, at most `max` (a stop repeated on a
-// circular line is not its own upstream).
-export function scanOrder(p: Pattern, stopId: string, max = SCAN_MAX): ScanStop[] {
+// The stops before `stopId` in the pattern, nearest first, at most `max` (default: all of them,
+// back to the first stop; a stop repeated on a circular line is not its own upstream).
+export function scanOrder(p: Pattern, stopId: string, max = Infinity): ScanStop[] {
   const i = stopIndex(p, stopId);
   if (i <= 0) return [];
   return p

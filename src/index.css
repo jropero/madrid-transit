@@ -1352,3 +1352,22 @@ p.next {
   padding: 0 6px;
   color: var(--fg);
 }
+
+/* Alerts tab: every alert of the area, expanded */
+.area-alert {
+  padding: 8px 0;
+  font-size: var(--t-small);
+}
+
+.area-alert a {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent);
+}
+
+.area-lines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}

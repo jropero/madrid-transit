@@ -8,7 +8,6 @@ import {
   loadStopTowns,
 } from './data.ts';
 import {
-  SCAN_MAX,
   hhmm,
   isBus,
   lineOptions,
@@ -47,7 +46,7 @@ export type ScanState = {
   running: boolean;
   finishedAt: number | null;
   failed: boolean; // the line's stop pattern could not be loaded
-  total: number; // stops to check (at most SCAN_MAX)
+  total: number; // stops to check (every earlier stop of the pattern)
   upto: number; // stops checked or in flight in the current pass
 };
 
@@ -239,7 +238,7 @@ const optionKey = (o: LineOption) => `${o.routeId}|${o.head}`;
 const tileStyle = (r: RouteInfo) =>
   ({ '--tile': r.color, '--tile-text': r.text }) as React.CSSProperties;
 
-function LineTile({ route }: { route: RouteInfo | undefined }) {
+export function LineTile({ route }: { route: RouteInfo | undefined }) {
   if (!route) return null;
   return (
     <span className={`tile mini${tileSize(route.line)}`} style={tileStyle(route)}>
@@ -466,7 +465,6 @@ export default function LineTab(p: {
             {scanStatus(state, nameOf)}
           </p>
           {own && <p className="status">{OWN_TEXT[own]}</p>}
-          <p className="status">máximo {SCAN_MAX} paradas anteriores, la más cercana primero</p>
           {pattern && data && (
             <PatternStops pattern={pattern} stopId={stop.id} state={state} data={data} />
           )}

@@ -210,9 +210,9 @@ export default function Settings({
       <h2 className="title">acerca de</h2>
       <p className="about">
         Cercanías: horarios y retrasos en tiempo real de Renfe. Autobuses interurbanos, Metro,
-        Metro Ligero y Tranvía de Parla: horarios y tiempos de paso del CRTM; municipios de los
-        datos abiertos del CRTM. Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System Icons
-        (MIT).
+        Metro Ligero y Tranvía de Parla: horarios, tiempos de paso y avisos del CRTM; municipios
+        de los datos abiertos del CRTM. Tipografía: Selawik (SIL OFL). Iconos: Fluent UI System
+        Icons (MIT).
       </p>
       <p className="about">
         Origen de los datos:{' '}

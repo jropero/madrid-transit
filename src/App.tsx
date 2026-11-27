@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
+import AlertsTab from './AlertsTab.tsx';
 import LineTab, { useLineScan } from './LineScan.tsx';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
@@ -20,6 +21,7 @@ import {
   fetchTripUpdates,
   fetchTripUpdatesLd,
   isOffline,
+  nearFailure,
   prefetchLive,
   warmOffline,
   isTimeout,
@@ -80,11 +82,12 @@ import {
   type TripUpdates,
 } from './gtfs.ts';
 
-const VIEWS = ['departures', 'line', 'settings'] as const;
+const VIEWS = ['departures', 'line', 'alerts', 'settings'] as const;
 type View = (typeof VIEWS)[number];
 const VIEW_LABEL: Record<View, string> = {
   departures: 'salidas',
   line: 'escáner',
+  alerts: 'alertas',
   settings: 'ajustes',
 };
 
@@ -93,12 +96,6 @@ const VIEW_LABEL: Record<View, string> = {
 // A failed load of a local file: a friendly text offline, the raw error otherwise.
 const loadFailure = (err: unknown, offlineText: string) =>
   isOffline(err) ? offlineText : String(err);
-
-// Near me: geolocation errors keep their message; a lost connection gets the friendly text.
-function nearFailure(err: unknown) {
-  if (isOffline(err)) return 'sin conexión · lista de paradas no cargada';
-  return err instanceof Error ? err.message : String(err);
-}
 
 // Static timetable (stops, routes, calendar), loaded once.
 function useTimetable() {
@@ -1464,6 +1461,10 @@ export default function App() {
             routes={tt?.routes ?? null}
             scan={scan}
           />,
+        )}
+        {pane(
+          'alerts',
+          <AlertsTab stop={nav.stop} active={view === 'alerts'} routes={tt?.routes ?? null} />,
         )}
         {pane('settings', <Settings stops={stops} onStops={updateStops} />)}
       </div>

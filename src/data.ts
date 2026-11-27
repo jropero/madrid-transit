@@ -270,6 +270,12 @@ const slimTrips = (f: TripUpdates): TripUpdates => ({
 
 export const isOffline = (err: unknown) => err instanceof TypeError;
 
+// Near me: geolocation errors keep their message; a lost connection gets the friendly text.
+export function nearFailure(err: unknown) {
+  if (isOffline(err)) return 'sin conexión · lista de paradas no cargada';
+  return err instanceof Error ? err.message : String(err);
+}
+
 // fetchedAt: when the answer was fetched upstream (now minus X-Data-Age; the copy time offline).
 // upstream: set when rt.php served an old copy because its own upstream call failed.
 // stale: the copy is older than LIVE_MAX_AGE_MS, so `data` is the feed's empty value.
@@ -364,6 +370,27 @@ export const fetchPositions = (ld: boolean) => {
 };
 
 export const fetchAlerts = () => fetchFeed<AlertFeed>('alerts', 'f=alerts', f => f);
+
+// CRTM "Avisos" page of a mode as {html, at} (rt.php caches 10 min; so does this memo). Failures
+// are not memoised.
+export type AvisosJson = { html: string; at: number };
+const AVISOS_MEMO_MS = 600_000;
+const avisosMemo = new Map<string, { at: number; p: Promise<Feed<AvisosJson>> }>();
+export const fetchAvisos = (mode: string) => {
+  const hit = avisosMemo.get(mode);
+  if (hit && Date.now() - hit.at < AVISOS_MEMO_MS) return hit.p;
+  const p = fetchFeed<AvisosJson>(
+    `avisos:${mode}`,
+    `f=crtm_avisos&m=${encodeURIComponent(mode)}`,
+    f => f,
+  );
+  avisosMemo.set(mode, { at: Date.now(), p });
+  p.then(
+    f => f.offlineSince && avisosMemo.delete(mode),
+    () => avisosMemo.delete(mode),
+  );
+  return p;
+};
 
 // CRTM stop times for a bus or light-rail stop (`par_8_16578` -> `8_16578`). rt.php caches for
 // 60 s; the client memo does too, so re-renders and quick manual refreshes never refetch. The

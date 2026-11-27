@@ -113,7 +113,7 @@ const AlertList = ({ list, board }: { list: Alert[]; board: AlertBoard }) =>
     </ul>
   ) : null;
 
-const count = (n: number) => `${n} ${n === 1 ? 'aviso' : 'avisos'}`;
+export const count = (n: number) => `${n} ${n === 1 ? 'aviso' : 'avisos'}`;
 
 function Hidden({ board }: { board: AlertBoard }) {
   return board.hidden ? (

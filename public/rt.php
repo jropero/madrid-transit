@@ -677,6 +677,58 @@ function serve_swr(string $cache, int $ttl, callable $refresh): void {
     exit;
 }
 
+// CRTM "Avisos" pages (plain HTML, mode-wide notices): only the `contAvisosInfo` block is kept,
+// cached as {"html": <block inner HTML>, "at": <unix>}. Kept in step with scripts/avisos-block.mjs.
+const AVISOS_MAX = 65536; // bytes of block HTML kept
+const AVISOS_MODES = ['interurbanos', 'metro', 'metro-ligero'];
+
+function avisos_block(string $page): ?string {
+    $open = strpos($page, 'class="contAvisosInfo"');
+    $gt = $open === false ? false : strpos($page, '>', $open);
+    if ($gt === false) {
+        return null;
+    }
+    $start = $gt + 1;
+    $end = strpos($page, '<style', $start);
+    $inner = rtrim(substr($page, $start, $end === false ? null : $end - $start));
+    // The block's own closing tag.
+    $inner = preg_replace('#</div>\z#', '', $inner);
+    return substr(trim($inner), 0, AVISOS_MAX);
+}
+
+// One fetch of an Avisos page into $cache. A page without the block, a non-2xx or a network
+// error: failure recorded, negative cache, a stale copy stays the answer where there is one.
+function avisos_refresh(string $url, string $cache, string $neg): void {
+    $stale = is_file($cache);
+    if (neg_get($neg) !== null) {
+        if (!$stale) {
+            fail(502, 'upstream unavailable');
+        }
+        return;
+    }
+    $ctx = stream_context_create(['http' => ['timeout' => http_timeout(), 'header' => "Accept: text/html\r\n"]]);
+    $t0 = microtime(true);
+    $page = @file_get_contents($url, false, $ctx, 0, 1048576);
+    $status = 0;
+    if (isset($http_response_header[0]) && preg_match('#^HTTP/\S+ (\d{3})#', $http_response_header[0], $m)) {
+        $status = (int) $m[1];
+    }
+    $html = $page === false || $status < 200 || $status > 299 ? null : avisos_block($page);
+    $json = $html === null ? false : json_encode(['html' => $html, 'at' => time()], JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($json !== false) {
+        up_ok();
+        state_write($cache, $json, 0600);
+        return;
+    }
+    $timedOut = $page === false && $status === 0 && microtime(true) - $t0 >= http_timeout() - 0.5;
+    [$s, $k] = up_classify($status, $page === false ? null : $page, $timedOut);
+    up_fail($s, $k, $page === false ? null : $page);
+    neg_set($neg, 502, 'upstream unavailable');
+    if (!$stale) {
+        fail(502, 'upstream unavailable');
+    }
+}
+
 $f = $_GET['f'] ?? '';
 if (!is_string($f)) {
     fail(400, 'bad feed');
@@ -688,6 +740,18 @@ if ($f === 'emt') {
     $ttl = 30;
     $refresh = function () use ($stop, $cache): void {
         emt_refresh($stop, $cache);
+    };
+} elseif ($f === 'crtm_avisos') {
+    $mode = $_GET['m'] ?? '';
+    if (!is_string($mode) || !in_array($mode, AVISOS_MODES, true)) {
+        fail(400, 'bad mode');
+    }
+    $url = 'https://www.crtm.es/comunicacion/actualidad-del-servicio/avisos/avisos-' . $mode . '/';
+    $cache = state_file('crtm-avisos-' . $mode . '.json');
+    $ttl = 600;
+    $neg = 'crtm-avisos-' . $mode;
+    $refresh = function () use ($url, $cache, $neg): void {
+        avisos_refresh($url, $cache, $neg);
     };
 } elseif ($f === 'crtm' || in_array($f, ['trip_updates', 'trip_updates_LD', 'alerts', 'vehicle_positions', 'vehicle_positions_LD'], true)) {
     if ($f === 'crtm') {
