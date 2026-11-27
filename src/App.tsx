@@ -1464,6 +1464,9 @@ export default function App() {
   const { tt } = useTimetable();
   const { deps: stopFile, error: fileError } = useStopDeps(nav.stop.id);
   const scan = useLineScan(nav.stop.id);
+  // Switching tabs stops a running scan and its follow-ups (an estimate already found stays).
+  const pauseScan = scan.pause;
+  useEffect(() => pauseScan(), [view, pauseScan]);
 
   function updateStops(next: Saved[]) {
     setStops(next);

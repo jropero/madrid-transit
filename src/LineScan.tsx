@@ -52,6 +52,7 @@ export type ScanState = {
   batchAt: number | null; // when the current batch started
   away: number; // the hit is this many stops before the selected one
   nextAt: number | null; // when the next follow-up pass is due (after a hit)
+  paused: boolean; // stopped by a tab switch: no pass running, no follow-up due
 };
 
 const EMPTY: ScanState = {
@@ -68,6 +69,7 @@ const EMPTY: ScanState = {
   batchAt: null,
   away: 0,
   nextAt: null,
+  paused: false,
 };
 
 type Probe = { id: string; scan: StopScan; rows: CrtmRow[] };
@@ -191,9 +193,17 @@ export function useLineScan(stopId: string) {
   const target = state.target;
   const refresh = useCallback(() => {
     if (!target || busy.current) return;
-    setState(s => ({ ...s, running: true, nextAt: null }));
+    setState(s => ({ ...s, running: true, nextAt: null, paused: false }));
     void pass(target, true);
   }, [target, pass]);
+
+  // Leaving the tab (App calls this on every pivot change): a search still looking for a bus
+  // stops; after a hit the estimate stays as it is and no more follow-up passes run.
+  const pause = useCallback(() => {
+    gen.current++;
+    busy.current = false;
+    setState(pausedState);
+  }, []);
 
   // After a hit, the next pass is due FOLLOW_MS after the last one ended; while the page is
   // hidden it waits and runs as soon as the page is visible again.
@@ -210,10 +220,62 @@ export function useLineScan(stopId: string) {
     };
   }, [nextAt, refresh]);
 
-  return { state, start, stop, refresh };
+  return { state, start, stop, refresh, pause };
 }
 
 export type LineScanApi = ReturnType<typeof useLineScan>;
+
+// The state after a tab switch: unchanged when nothing runs or is due (no target, or a pass
+// without a bus already ended), else stopped where it was.
+function pausedState(s: ScanState): ScanState {
+  if (!s.target || (!s.running && s.nextAt === null)) return s;
+  const finishedAt = s.finishedAt ?? Date.now();
+  // A batch cut short is not checked: its stops go back to unchecked.
+  const scans = Object.fromEntries(
+    Object.entries(s.scans).filter(([id]) => !s.inFlight.includes(id)),
+  );
+  const upto = s.upto - s.inFlight.length;
+  return {
+    ...s,
+    running: false,
+    inFlight: [],
+    batchAt: null,
+    nextAt: null,
+    paused: true,
+    finishedAt,
+    scans,
+    upto,
+  };
+}
+console.assert(
+  (() => {
+    const t = { stopId: 'a', routeId: 'r', head: 'h', pi: 0 };
+    const running = pausedState({
+      ...EMPTY,
+      target: t,
+      running: true,
+      upto: 3,
+      inFlight: ['x'],
+      scans: { x: { k: 'checking' }, y: { k: 'none' } },
+    });
+    const following = pausedState({ ...EMPTY, target: t, hit: 'b', finishedAt: 5, nextAt: 9 });
+    const done = { ...EMPTY, target: t, finishedAt: 5 };
+    return (
+      running.paused &&
+      !running.running &&
+      !running.inFlight.length &&
+      running.upto === 2 &&
+      !('x' in running.scans) &&
+      'y' in running.scans &&
+      following.paused &&
+      following.nextAt === null &&
+      following.hit === 'b' &&
+      pausedState(done) === done &&
+      pausedState(EMPTY) === EMPTY
+    );
+  })(),
+  'pausedState',
+);
 
 // What the scan is doing, as up to three lines: `phase` (announced), `detail` and `next`
 // (countdowns: not announced). `bar` is the share of stops checked during a pass, else null.
@@ -241,13 +303,19 @@ function hitInfo(s: ScanState, now: number, hidden: boolean, nameOf: (id: string
   if (s.running)
     return { phase, detail: `actualizando… ${s.upto} de ${s.total} paradas`, next: '' };
   const ago = s.finishedAt === null ? '' : `comprobado hace ${secs(now - s.finishedAt)}`;
-  const next = hidden
-    ? 'en pausa mientras la app está en segundo plano'
-    : `siguiente comprobación en ${secs((s.nextAt ?? now) - now)}`;
-  return { phase, detail: ago, next };
+  return { phase, detail: ago, next: followText(s, now, hidden) };
 }
 
+function followText(s: ScanState, now: number, hidden: boolean): string {
+  if (s.paused) return 'seguimiento detenido al cambiar de pestaña · pulsa comprobar ahora';
+  if (hidden) return 'en pausa mientras la app está en segundo plano';
+  return `siguiente comprobación en ${secs((s.nextAt ?? now) - now)}`;
+}
+
+const STOPPED = 'búsqueda detenida al cambiar de pestaña';
+
 function idleInfo(s: ScanState): string {
+  if (s.paused) return STOPPED;
   if (s.finishedAt === null) return 'comprobando…';
   if (s.total === 0) return 'esta es la primera parada de la línea: no hay paradas anteriores';
   return `sin buses en vivo en las ${stopsText(s.total)} anteriores`;
@@ -272,9 +340,13 @@ export function scanInfo(
     const phase = `buscando un bus en vivo · ${s.upto - s.inFlight.length} de ${s.total} paradas`;
     return { phase, detail: waitingText(s, now, nameOf), next: '', bar };
   }
-  const at = s.finishedAt === null ? '' : `comprobado a las ${hhmm(new Date(s.finishedAt))}`;
-  return { phase: idleInfo(s), detail: at, next: '', bar };
+  return { phase: idleInfo(s), detail: idleDetail(s), next: '', bar };
 }
+function idleDetail(s: ScanState): string {
+  if (s.paused) return `${s.upto - s.inFlight.length} de ${s.total} paradas comprobadas`;
+  return s.finishedAt === null ? '' : `comprobado a las ${hhmm(new Date(s.finishedAt))}`;
+}
+
 // The one-line progress under salidas' "estima tiempo" (no stop names: it stays short).
 export function estimateText(s: ScanState, now: number): string {
   if (!s.target) return '';
