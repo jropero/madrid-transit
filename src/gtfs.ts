@@ -101,6 +101,7 @@ export type Departure = {
   distM?: number; // EMT only: distance of the bus to the stop, metres
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
   endStop?: string; // CRTM rows: the trip's last stop (`par_<code>`), to pick its pattern
+  issue?: string; // CRTM rows: the trip id (`codIssue`), stable across stops: the same bus
 };
 
 // Per-stop update, slimmed to a delay (seconds) or an absolute time (unix seconds, a string).
@@ -910,6 +911,7 @@ export type CrtmRow = {
   estimated?: true; // projected from a live bus at an earlier stop of the line (line scan)
   from?: string; // estimated rows: the stop id the live bus was seen at
   arr?: true; // estimated rows: an arrivals estimate (llegadas board), not a departure one
+  found?: number; // estimated rows: when the scan found the bus (ms epoch)
 };
 
 const many = <T>(v: One<T> | undefined): T[] => {
@@ -1021,6 +1023,7 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   text: routes[r.routeId]?.text ?? '#ffffff',
   dest: r.dest,
   pi: r.pi,
+  issue: r.issue || undefined,
   endStop: r.code ? `par_${r.code}` : undefined,
   bus: true,
   tram: r.tram,
@@ -1121,17 +1124,30 @@ export function mergeCrtm(
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
 
+// Two rows are one bus when both carry a CRTM trip id and it is equal, two buses when both carry
+// one and they differ; null when either has none (the time rules decide).
+const sameBus = (a: Departure, b: Departure): boolean | null =>
+  a.issue && b.issue ? a.issue === b.issue : null;
+
 // CRTM rows not live (timetable times) with a tracked bus of the same route and destination
 // after them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked
 // 15:55:35). A line-scan estimate is a tracked bus too (seen live at an earlier stop).
+// A row whose trip id some tracked row carries is that bus, at whatever time: never "lost" (16578,
+// 461: 00:07:00 #827 with the 23:53 estimate of #827 and a later estimate of #835).
 const tracked = (d: Departure) => d.live || !!d.estimated;
 function markUnconfirmed(crtm: Departure[]): Departure[] {
+  const isTracked = (d: Departure) => crtm.some(o => tracked(o) && sameBus(d, o) === true);
   const trackedLater = (d: Departure) =>
     crtm.some(
       o =>
-        tracked(o) && o.routeId === d.routeId && o.dest === d.dest && o.expected > d.expected,
+        tracked(o) &&
+        o.routeId === d.routeId &&
+        o.dest === d.dest &&
+        o.expected > d.expected &&
+        sameBus(d, o) !== true,
     );
-  return crtm.map(d => (!tracked(d) && trackedLater(d) ? { ...d, unconfirmed: true } : d));
+  const lost = (d: Departure) => !tracked(d) && !isTracked(d) && trackedLater(d);
+  return crtm.map(d => (lost(d) ? { ...d, unconfirmed: true } : d));
 }
 console.assert(
   (() => {
@@ -1146,6 +1162,26 @@ console.assert(
     return !!sched.unconfirmed && !est.unconfirmed && !later.unconfirmed;
   })(),
   'markUnconfirmed: timetable times before an estimate are unconfirmed',
+);
+console.assert(
+  (() => {
+    const at = (m: number) => new Date(Date.UTC(2026, 10, 27, 20, m));
+    const row = (m: number, extra: Partial<Departure>) =>
+      ({ routeId: 'r', dest: 'X', expected: at(m), live: false, ...extra }) as Departure;
+    const [same, diff] = markUnconfirmed([
+      row(5, { issue: '1' }),
+      row(6, { issue: '2' }),
+      row(16, { estimated: true, issue: '1' }),
+    ]);
+    // #1 tracked earlier (estimate at 3), a later estimate of #2: the 20 is still #1's.
+    const [, mine] = markUnconfirmed([
+      row(3, { estimated: true, issue: '1' }),
+      row(20, { issue: '1' }),
+      row(28, { estimated: true, issue: '2' }),
+    ]);
+    return !same.unconfirmed && !!diff.unconfirmed && !mine.unconfirmed;
+  })(),
+  'markUnconfirmed: the same trip id is not unconfirmed, another one is',
 );
 
 console.assert(
@@ -1289,6 +1325,7 @@ console.assert(
     const sched = (h: string, routeId = 'A'): CrtmRow => ({
       ...row(at(h)),
       routeId,
+      issue: `s${h}${routeId}`, // its own trip, not the live row's
       scheduled: true,
     });
     const g = mergeCrtm(
@@ -2391,6 +2428,107 @@ export function scanOrder(p: Pattern, stopId: string, max = Infinity): ScanStop[
     .map(([id, off]) => ({ id, off }));
 }
 
+// The part of a scan order from which a bus can still land within `maxSecs` of timetable travel
+// at `here` (nearest first, so the offsets only grow). A pattern without offsets is not cut.
+export function scanWithin(p: Pattern, here: string, order: ScanStop[], maxSecs: number) {
+  const i = stopIndex(p, here);
+  if (i < 0) return order;
+  return order.filter(s => p[i][1] - s.off <= maxSecs);
+}
+console.assert(
+  (() => {
+    const p: Pattern = [
+      ['a', 0],
+      ['b', 1800],
+      ['c', 3600],
+      ['d', 5400],
+      ['e', 5400],
+    ];
+    const o = scanOrder(p, 'e');
+    const flat: Pattern = [
+      ['a', 0],
+      ['b', 0],
+      ['c', 0],
+    ];
+    return (
+      scanWithin(p, 'e', o, 3600)
+        .map(s => s.id)
+        .join() === 'd,c,b' && scanWithin(flat, 'c', scanOrder(flat, 'c'), 3600).length === 2
+    );
+  })(),
+  'scanWithin',
+);
+
+// The buses of one scan pass, found nearest stop first. A bus is identified by `issue` (CRTM's
+// trip id, stable across stops): the nearest stop that sees it live projects it. A row without
+// an issue is a new bus only when its projected time is over 2 min from every bus found.
+export type FoundBus = { issue: string; stopId: string; rows: CrtmRow[] };
+export const MAX_BUSES = 3;
+const SAME_BUS_MS = 120_000;
+
+const groupByIssue = (hits: CrtmRow[]): [string, CrtmRow[]][] => {
+  const byIssue = new Map<string, CrtmRow[]>();
+  const loose: [string, CrtmRow[]][] = [];
+  for (const h of hits) {
+    if (!h.issue) loose.push(['', [h]]);
+    else byIssue.set(h.issue, [...(byIssue.get(h.issue) ?? []), h]);
+  }
+  return [...byIssue, ...loose];
+};
+
+const nearProjection = (found: FoundBus[], rows: CrtmRow[]) =>
+  found.some(b =>
+    b.rows.some(r =>
+      rows.some(x => Math.abs(x.when.getTime() - r.when.getTime()) <= SAME_BUS_MS),
+    ),
+  );
+
+const isNewBus = (found: FoundBus[], issue: string, projected: CrtmRow[]) =>
+  issue ? !found.some(b => b.issue === issue) : !nearProjection(found, projected);
+
+export function addBuses(
+  found: FoundBus[],
+  stopId: string,
+  hits: CrtmRow[],
+  project: (rows: CrtmRow[]) => CrtmRow[],
+  max = MAX_BUSES,
+): FoundBus[] {
+  const out = [...found];
+  for (const [issue, rows] of groupByIssue(hits)) {
+    const projected = project(rows);
+    if (out.length < max && isNewBus(out, issue, projected))
+      out.push({ issue, stopId, rows: projected });
+  }
+  return out;
+}
+console.assert(
+  (() => {
+    const row = (issue: string, min: number) =>
+      ({ issue, when: new Date(min * 60_000) }) as unknown as CrtmRow;
+    const id = (rows: CrtmRow[]) => rows;
+    const a = addBuses([], 's1', [row('1', 10)], id);
+    const same = addBuses(a, 's2', [row('1', 12)], id);
+    const second = addBuses(same, 's3', [row('2', 40)], id);
+    const nearLoose = addBuses(second, 's4', [row('', 11)], id);
+    const farLoose = addBuses(second, 's4', [row('', 70)], id);
+    const capped = addBuses(farLoose, 's5', [row('9', 90)], id, 3);
+    const grouped = addBuses([], 's1', [row('1', 10), row('1', 30)], id);
+    return (
+      a.length === 1 &&
+      same.length === 1 &&
+      same[0].stopId === 's1' &&
+      second.length === 2 &&
+      second[1].stopId === 's3' &&
+      nearLoose.length === 2 &&
+      farLoose.length === 3 &&
+      capped.length === 3 &&
+      grouped.length === 1 &&
+      grouped[0].rows.length === 2
+    );
+  })(),
+  'addBuses',
+);
+
 // Arrivals scan options of a terminus: per route of the stop file, its longest pattern that
 // ends at `stopId`, labelled "desde <town of its first stop>" (`townOf` falls back to a name).
 export function arrivalOptions(
@@ -2511,23 +2649,171 @@ export function mergeProjected(manual: CrtmRow[], auto: CrtmRow[]): CrtmRow[] {
   return out;
 }
 
+// Estimates are kept (per stop, per scan target key) until a live row pairs with them, a newer
+// scan of the line finds a bus, or their time is past: never because of age, a stop change or a
+// pass that found nothing.
+export type KeptRows = Record<string, CrtmRow[]>;
+const PAST_MS = 60_000; // a row stays until its time is this far past (the board's window)
+
+export const freshRows = (rows: CrtmRow[], now: number): CrtmRow[] =>
+  rows.filter(r => r.when.getTime() >= now - PAST_MS);
+
+// Drops past rows, and keys left without rows.
+export function pruneKept(kept: KeptRows, now: number): KeptRows {
+  const out: KeptRows = {};
+  for (const [k, rows] of Object.entries(kept)) {
+    const fresh = freshRows(rows, now);
+    if (fresh.length) out[k] = fresh;
+  }
+  return out;
+}
+
+// The rows of a scan being replaced (or left) go under its key; none: nothing changes. The old
+// entry of the key the new scan is about to own stays until that scan finds a bus.
+export function keepEstimate(
+  kept: KeptRows,
+  key: string | null,
+  rows: CrtmRow[],
+  now: number,
+): KeptRows {
+  const next =
+    key !== null && rows.length > 0
+      ? { ...kept, [key]: mergeBuses(kept[key] ?? [], rows) }
+      : kept;
+  return pruneKept(next, now);
+}
+console.assert(
+  (() => {
+    const row = (ms: number) => ({ when: new Date(ms) }) as unknown as CrtmRow;
+    const a = keepEstimate({}, 'a', [row(100_000)], 0);
+    const empty = keepEstimate(a, 'b', [], 0);
+    const nullKey = keepEstimate(a, null, [row(100_000)], 0);
+    const past = pruneKept(a, 100_000 + PAST_MS + 1);
+    const edge = pruneKept(a, 100_000 + PAST_MS);
+    return (
+      Object.keys(a).join() === 'a' &&
+      Object.keys(empty).join() === 'a' &&
+      Object.keys(nullKey).join() === 'a' &&
+      Object.keys(past).length === 0 &&
+      Object.keys(edge).join() === 'a' &&
+      keepEstimate(a, 'a', [row(200_000)], 0)['a'][0].when.getTime() === 200_000 &&
+      freshRows([row(1_000), row(100_000)], 100_000 + PAST_MS).length === 1
+    );
+  })(),
+  'keepEstimate / pruneKept / freshRows',
+);
+
+// Fresh rows plus the old rows of buses the fresh ones do not show (a scan may miss a bus for a
+// moment, its estimate stays). Same bus: the same non-empty `issue`; an old row without one is
+// that bus when a fresh row of the same route + dest + kind is within 2 min.
+// Rows are never restamped: each keeps the `found` of the pass that made it, and when both sides
+// carry the same bus the newer `found` wins (a tie: the fresh row).
+export function mergeBuses(old: CrtmRow[], incoming: CrtmRow[]): CrtmRow[] {
+  const newer = (f: CrtmRow) =>
+    !!f.issue && old.some(o => o.issue === f.issue && (o.found ?? 0) > (f.found ?? 0));
+  const fresh = incoming.filter(f => !newer(f));
+  const issues = new Set(fresh.map(r => r.issue).filter(Boolean));
+  const seen = (o: CrtmRow) =>
+    fresh.some(
+      f =>
+        f.routeId === o.routeId &&
+        f.dest === o.dest &&
+        !!f.arr === !!o.arr &&
+        Math.abs(f.when.getTime() - o.when.getTime()) <= SAME_BUS_MS,
+    );
+  return [...fresh, ...old.filter(o => (o.issue ? !issues.has(o.issue) : !seen(o)))];
+}
+console.assert(
+  (() => {
+    const row = (issue: string, min: number, dest = 'X') =>
+      ({ issue, routeId: 'r', dest, when: new Date(min * 60_000) }) as unknown as CrtmRow;
+    const missed = mergeBuses([row('1', 10), row('2', 30)], [row('1', 12)]);
+    const loose = mergeBuses([row('', 10), row('', 40)], [row('', 11)]);
+    const other = mergeBuses([row('', 10, 'Y')], [row('', 10)]);
+    return (
+      missed.length === 2 &&
+      missed[0].when.getTime() === 12 * 60_000 &&
+      missed[1].issue === '2' &&
+      loose.length === 2 &&
+      loose[1].when.getTime() === 40 * 60_000 &&
+      other.length === 2 &&
+      mergeBuses([], [row('1', 1)]).length === 1 &&
+      (() => {
+        const o = { ...row('1', 10), found: 20 } as CrtmRow;
+        const f = { ...row('1', 12), found: 10 } as CrtmRow;
+        const r = mergeBuses([o], [f]);
+        return r.length === 1 && r[0] === o && mergeBuses([f], [o])[0] === o;
+      })()
+    );
+  })(),
+  'mergeBuses',
+);
+
+// Of several finds of one bus (route + dest + board kind + `issue`) only the newest (max `found`,
+// none = 0) stays, whichever scan made it; so two buses of a line from different passes both
+// stay. Rows without an issue: the newest find per line, a tie keeps every row of it. Input
+// order is kept.
+export function newestPerBus(rows: CrtmRow[]): CrtmRow[] {
+  const key = (r: CrtmRow) => `${r.routeId}|${r.dest}|${r.arr ? 1 : 0}|${r.issue || ''}`;
+  const max = new Map<string, number>();
+  for (const r of rows) max.set(key(r), Math.max(max.get(key(r)) ?? 0, r.found ?? 0));
+  return rows.filter(r => (r.found ?? 0) === max.get(key(r)));
+}
+console.assert(
+  (() => {
+    const row = (route: string, ms: number, found?: number, arr?: true, issue = '') =>
+      ({
+        routeId: route,
+        dest: 'X',
+        when: new Date(ms),
+        found,
+        arr,
+        issue,
+      }) as unknown as CrtmRow;
+    const rows = [row('a', 1, 10), row('a', 2, 10), row('a', 3, 20), row('b', 1, 5)];
+    const out = newestPerBus(rows);
+    const buses = newestPerBus([
+      row('a', 1, 10, undefined, '1'),
+      row('a', 2, 20, undefined, '2'),
+    ]);
+    const same = newestPerBus([
+      row('a', 1, 10, undefined, '1'),
+      row('a', 2, 20, undefined, '1'),
+    ]);
+    return (
+      out.length === 2 &&
+      out[0].when.getTime() === 3 &&
+      out[1].routeId === 'b' &&
+      newestPerBus([row('a', 1, 20), row('a', 2, 20), row('a', 3, 10)]).length === 2 &&
+      newestPerBus([row('a', 1, 10), row('a', 2, 5, true)]).length === 2 &&
+      newestPerBus([row('a', 1), row('a', 2, 3)]).length === 1 &&
+      buses.length === 2 &&
+      same.length === 1 &&
+      same[0].when.getTime() === 2
+    );
+  })(),
+  'newestPerBus',
+);
+
 // An estimate and a live row of one line (`single`: the stop has one direction of the route, so
 // only the route is compared).
 const sameLine = (a: Departure, b: Departure, single: (routeId: string) => boolean) =>
   a.routeId === b.routeId && (single(a.routeId) || a.dest === b.dest);
 
-const PAIR_MAX_MS = 20 * 60_000;
+// A live time and an estimate more than 10 min apart are two buses, even with the same trip id.
+const PAIR_MAX_MS = 10 * 60_000;
 const ALSO_EST_MS = 2 * 60_000;
 type Pair = { est: Departure; live: Departure; gap: number };
 
-// Every estimate with the own live rows of its line within PAIR_MAX_MS, closest first.
+// Every estimate with the own live rows of its line within PAIR_MAX_MS, closest first (when both
+// carry a trip id they pair only if it is equal).
 function pairCandidates(deps: Departure[], single: (routeId: string) => boolean): Pair[] {
   const lives = deps.filter(d => d.live && !d.estimated);
   return deps
     .filter(d => d.estimated)
     .flatMap(est =>
       lives
-        .filter(live => sameLine(est, live, single))
+        .filter(live => sameLine(est, live, single) && sameBus(est, live) !== false)
         .map(live => ({
           est,
           live,
@@ -2541,16 +2827,19 @@ function pairCandidates(deps: Departure[], single: (routeId: string) => boolean)
 // An estimate that stays on the board stands for the timetable time it projects (CRTM's own
 // whole-minute time or a timetable run of the same line and destination, nearest within 2 min):
 // that time is dropped, else 16578 showed "461 21:49 estimado" right above "461 21:50". Each
-// estimate takes at most one; live, estimated and "no confirmado" rows are never dropped.
+// estimate takes at most one; live, estimated and "no confirmado" rows are never dropped. With
+// trip ids (`issue`): the same id is dropped at any time gap, a different id never.
 const SHADOW_MS = 2 * 60_000;
 const plainRow = (d: Departure) => !d.live && !d.estimated && !d.unconfirmed && !d.cancelled;
 function nearestPlain(deps: Departure[], est: Departure, gone: Set<Departure>) {
+  const free = deps.filter(d => d.routeId === est.routeId && plainRow(d) && !gone.has(d));
+  const mine = free.find(d => sameBus(est, d) === true); // same trip id: any time gap
+  if (mine) return mine;
   let best: Departure | null = null;
   let gap = SHADOW_MS;
-  for (const d of deps) {
+  for (const d of free) {
     const g = Math.abs(d.expected.getTime() - est.expected.getTime());
-    const same = d.routeId === est.routeId && d.dest === est.dest;
-    if (same && plainRow(d) && !gone.has(d) && g <= gap) [best, gap] = [d, g];
+    if (d.dest === est.dest && sameBus(est, d) !== false && g <= gap) [best, gap] = [d, g];
   }
   return best;
 }
@@ -2631,6 +2920,7 @@ console.assert(
       mk(29, { estimated: true }),
     ]);
     const lone = pairEstimates([mk(40, { estimated: true }), live]);
+    const apart = pairEstimates([live, mk(21, { estimated: true })]);
     const other = pairEstimates([live, mk(15, { estimated: true, dest: 'Y' })]);
     const single = pairEstimates([live, mk(15, { estimated: true, dest: 'Y' })], () => true);
     return (
@@ -2642,11 +2932,59 @@ console.assert(
       twoLive[0].alsoEst?.getTime() === t0 + 12 * 60_000 &&
       twoLive[1].alsoEst === undefined &&
       lone.length === 2 &&
+      apart.length === 2 &&
       other.length === 2 &&
       single.length === 1
     );
   })(),
   'pairEstimates: nearest own live row of the line, alsoEst from 2 min, unpaired stays',
+);
+console.assert(
+  (() => {
+    const t0 = Date.UTC(2026, 10, 27, 20, 0);
+    const mk = (min: number, extra: Partial<Departure>) =>
+      ({
+        ...extra,
+        routeId: 'r',
+        dest: 'X',
+        live: extra.live ?? false,
+        expected: new Date(t0 + min * 60_000),
+        planned: new Date(t0 + min * 60_000),
+      }) as Departure;
+    const same = pairEstimates([
+      mk(10, { live: true, issue: '1' }),
+      mk(19, { estimated: true, issue: '1' }),
+    ]);
+    const far = pairEstimates([
+      mk(10, { live: true, issue: '1' }),
+      mk(25, { estimated: true, issue: '1' }),
+    ]);
+    const diff = pairEstimates([
+      mk(10, { live: true, issue: '1' }),
+      mk(11, { estimated: true, issue: '2' }),
+    ]);
+    return same.length === 1 && far.length === 2 && diff.length === 2;
+  })(),
+  'pairEstimates: the same trip id pairs within 10 min, over it or a different id never',
+);
+console.assert(
+  (() => {
+    const t0 = Date.UTC(2026, 10, 27, 20, 0);
+    const mk = (min: number, extra: Partial<Departure> = {}) =>
+      ({
+        ...extra,
+        routeId: 'r',
+        dest: 'X',
+        live: false,
+        expected: new Date(t0 + min * 60_000),
+      }) as Departure;
+    const est = mk(53, { estimated: true, issue: '1' });
+    const far = dropShadowed([est, mk(67, { issue: '1' })]);
+    const diff = dropShadowed([est, mk(53, { issue: '2' })]);
+    const loose = dropShadowed([est, mk(54)]);
+    return far.length === 1 && diff.length === 2 && loose.length === 1;
+  })(),
+  'dropShadowed: the same trip id is dropped at any gap, a different one never',
 );
 
 console.assert(

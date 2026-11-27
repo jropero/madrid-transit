@@ -75,6 +75,7 @@ import {
   dropShadowed,
   pairEstimates,
   mergeProjected,
+  newestPerBus,
   type TimeFilter,
   type SortMode,
   locate,
@@ -1256,7 +1257,7 @@ function useBoardEstimates(p: {
   });
   const own = timeMode ? auto.rows : NONE;
   const estimates = useMemo(
-    () => mergeProjected(projected, own).filter(r => !!r.arr === arrivals),
+    () => newestPerBus(mergeProjected(projected, own)).filter(r => !!r.arr === arrivals),
     [projected, own, arrivals],
   );
   return { estimates, status: auto.status };
@@ -1720,7 +1721,7 @@ export default function App() {
               onSelect={select}
               onJump={jump}
               onStops={updateStops}
-              projected={scan.state.rows}
+              projected={scan.rows}
             />
           </EstimateCtx>,
         )}

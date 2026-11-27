@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { loadEstimates, MANUAL_KEY, saveEstimates } from './estimateStore.ts';
 import {
   directCrtm,
   fetchCrtm,
@@ -12,16 +13,27 @@ import {
   arrivalOptions,
   hhmm,
   isBus,
+  freshRows,
+  keepEstimate,
+  mergeBuses,
+  pruneKept,
   lineOptions,
   liveMatches,
+  mergeProjected,
   parseCrtm,
   projectRows,
+  addBuses,
+  MAX_BUSES,
   scanOrder,
+  scanWithin,
   short,
   stopDirections,
   tileSize,
   type BusFile,
   type CrtmRow,
+  type FoundBus,
+  type ScanStop,
+  type KeptRows,
   type LineOption,
   type Pattern,
   type RouteInfo,
@@ -34,6 +46,7 @@ import {
 // earlier stop with a live bus and project its time onto the selected stop. Started only from
 // the tab (at a terminus also for arrivals: trips that end at the stop); at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS (2 min).
 const BATCH = 3;
+const HORIZON_S = 60 * 60; // a bus further than this (timetable travel) cannot land in the 60 min window
 const FOLLOW_MS = 120_000; // after a hit: the estimate stands, the next check in 2 min
 
 export type ScanTarget = {
@@ -79,6 +92,9 @@ const EMPTY: ScanState = {
   nextAt: null,
   paused: false,
 };
+
+// The key of a scan target (also the auto-estimate's): board kind + route + headsign.
+export const targetKey = (t: ScanTarget) => `${t.arr ? 'a' : 'd'}|${t.routeId}|${t.head}`;
 
 type Probe = { id: string; scan: StopScan; rows: CrtmRow[] };
 
@@ -126,8 +142,19 @@ async function runBatch(
   return probes;
 }
 
-// One pass, nearest first in batches; the first batch with a live bus ends it, and the nearest
-// stop of that batch wins. `alive` turns false once cancelled: late answers are dropped.
+// The buses found so far as the scan's result: all their rows, one `found` stamp per pass, and
+// the nearest bus's stop (`hit`) with how many stops before the selected one it is.
+function busesResult(buses: FoundBus[], order: ScanStop[], stamp: number): Partial<ScanState> {
+  const rows = buses.flatMap(b => b.rows).map(r => ({ ...r, found: stamp }));
+  const hit = buses[0]?.stopId ?? null;
+  return { hit, rows, away: order.findIndex(o => o.id === hit) + 1 };
+}
+
+// One pass, nearest first in batches of BATCH: it keeps walking after a hit to find up to
+// MAX_BUSES buses (by CRTM trip id), and stops at the first stop, or when the next stop is
+// over an hour of timetable travel away. The first bus is emitted at once (not on follow-ups,
+// which keep the old rows until the end). `alive` turns false once cancelled: late answers are
+// dropped.
 export async function runScan(
   t: ScanTarget,
   here: string,
@@ -140,23 +167,52 @@ export async function runScan(
     () => undefined,
   );
   if (!pattern) return { failed: true, hit: null, rows: [] };
-  const order = scanOrder(pattern, here);
+  const order = scanWithin(pattern, here, scanOrder(pattern, here), HORIZON_S);
   emit({ total: order.length, failed: false });
+  const stamp = Date.now();
+  const pass = { pattern, here, t, again, order, alive, emit, stamp };
   const scans: Record<string, StopScan> = {};
-  for (let i = 0; i < order.length; i += BATCH) {
-    const ids = order.slice(i, i + BATCH).map(s => s.id);
-    emit({ upto: i + ids.length, inFlight: ids, batchAt: Date.now() });
-    const probes = await runBatch(ids, t, scans, again, emit);
-    if (!alive()) return {};
-    emit({ scans: { ...scans }, inFlight: [] });
-    const hit = probes.find(p => p.rows.length > 0);
-    if (hit) {
-      const rows = projectRows(hit.rows, pattern, hit.id, here, t);
-      const away = order.findIndex(o => o.id === hit.id) + 1;
-      return { scans, hit: hit.id, rows, total: order.length, away };
-    }
+  let buses: FoundBus[] = [];
+  for (let i = 0; i < order.length && buses.length < MAX_BUSES; i += BATCH) {
+    const next = await scanBatch(pass, scans, i, buses);
+    if (!next) return {};
+    buses = next;
   }
-  return { scans, hit: null, rows: [], total: order.length, away: 0 };
+  return { scans, total: order.length, ...busesResult(buses, order, stamp) };
+}
+
+type PassCtx = {
+  pattern: Pattern;
+  here: string;
+  t: ScanTarget;
+  again: boolean;
+  order: ScanStop[];
+  alive: () => boolean;
+  emit: Emit;
+  stamp: number; // one `found` value for the whole pass
+};
+
+// One batch of a pass: the stops i.., checked in parallel, their buses added nearest first.
+// Null when cancelled meanwhile.
+async function scanBatch(
+  c: PassCtx,
+  scans: Record<string, StopScan>,
+  i: number,
+  found: FoundBus[],
+): Promise<FoundBus[] | null> {
+  const ids = c.order.slice(i, i + BATCH).map(s => s.id);
+  c.emit({ upto: i + ids.length, inFlight: ids, batchAt: Date.now() });
+  const probes = await runBatch(ids, c.t, scans, c.again, c.emit);
+  if (!c.alive()) return null;
+  c.emit({ scans: { ...scans }, inFlight: [] });
+  let buses = found;
+  for (const p of probes) {
+    const project = (rows: CrtmRow[]) => projectRows(rows, c.pattern, p.id, c.here, c.t);
+    buses = addBuses(buses, p.id, p.rows, project);
+  }
+  // The first bus is shown at once (follow-ups keep their old rows until the pass ends).
+  if (!c.again && !found.length && buses.length) c.emit(busesResult(buses, c.order, c.stamp));
+  return buses;
 }
 
 // Scan state of the selected stop. Reset when the stop changes; `start` begins a scan,
@@ -166,12 +222,43 @@ export function useLineScan(stopId: string) {
   const [state, setState] = useState<ScanState>(EMPTY);
   const gen = useRef(0);
   const busy = useRef(false);
-
+  const latest = useRef(state);
   useEffect(() => {
+    latest.current = state;
+  }, [state]);
+  // Estimates of earlier targets, per stop: kept until a newer scan of the line finds a bus, a
+  // live row pairs with them (the board), their time is past or "detener".
+  const [kept, setKept] = useState<Record<string, KeptRows>>(() => loadEstimates(MANUAL_KEY));
+  // Saved with the current scan stashed too, so a reload keeps its estimates.
+  const { target: curTarget, rows: curRows } = state;
+  useEffect(() => {
+    const now = { ...EMPTY, target: curTarget, rows: curRows };
+    saveEstimates(MANUAL_KEY, stashScan(kept, now));
+  }, [kept, curTarget, curRows]);
+  const keptRef = useRef(kept);
+  useEffect(() => {
+    keptRef.current = kept;
+  }, [kept]);
+
+  // The target being replaced (new scan, stop change) leaves its rows under its own stop.
+  useEffect(() => {
+    const prev = latest.current;
+    setKept(k => stashScan(k, prev));
     gen.current++;
     busy.current = false;
     setState(EMPTY);
   }, [stopId]);
+
+  // Drops past rows from memory once the earliest one is over.
+  useEffect(() => {
+    const whens = Object.values(kept).flatMap(m =>
+      Object.values(m).flatMap(rows => rows.map(r => r.when.getTime())),
+    );
+    if (!whens.length) return;
+    const wait = Math.max(0, Math.min(...whens) + 60_000 - Date.now()) + 50;
+    const id = window.setTimeout(() => setKept(k => pruneAll(k, Date.now())), wait);
+    return () => window.clearTimeout(id);
+  }, [kept]);
 
   const pass = useCallback(
     async (t: ScanTarget, again: boolean) => {
@@ -184,7 +271,9 @@ export function useLineScan(stopId: string) {
       busy.current = false;
       const at = Date.now();
       const nextAt = done.hit ? at + FOLLOW_MS : null;
-      setState(s => ({ ...s, ...done, running: false, finishedAt: at, inFlight: [], nextAt }));
+      const own = keptRef.current[t.stopId]?.[targetKey(t)] ?? [];
+      setState(s => settle(s, done, at, nextAt, own));
+      if (done.rows?.length) setKept(k => dropKept(k, t.stopId, targetKey(t)));
     },
     [stopId],
   );
@@ -192,6 +281,8 @@ export function useLineScan(stopId: string) {
   const start = useCallback(
     (t: ScanTarget) => {
       gen.current++;
+      const prev = latest.current;
+      setKept(k => stashScan(k, prev));
       setState({ ...EMPTY, target: t, running: true });
       void pass(t, false);
     },
@@ -201,6 +292,8 @@ export function useLineScan(stopId: string) {
   const stop = useCallback(() => {
     gen.current++;
     busy.current = false;
+    const t = latest.current.target;
+    if (t) setKept(k => dropKept(k, t.stopId, targetKey(t)));
     setState(EMPTY);
   }, []);
 
@@ -235,7 +328,58 @@ export function useLineScan(stopId: string) {
     };
   }, [nextAt, refresh]);
 
-  return { state, start, stop, refresh, pause };
+  // The current scan's rows first, then the kept ones of this stop's other lines.
+  const rows = useMemo(() => boardRows(state, kept[stopId] ?? NO_KEPT), [state, kept, stopId]);
+
+  return { state, rows, start, stop, refresh, pause };
+}
+
+const NO_KEPT: KeptRows = {};
+
+// The ScanState after a pass: a pass that found no bus keeps the rows already estimated.
+// A pass that found buses adds them to the rows kept (`own`: this target's stashed ones) and to
+// those already shown; a bus it missed keeps its estimate.
+function settle(
+  s: ScanState,
+  done: Partial<ScanState>,
+  at: number,
+  nextAt: number | null,
+  own: CrtmRow[],
+) {
+  const rows = done.rows?.length ? mergeBuses(mergeBuses(own, s.rows), done.rows) : s.rows;
+  return { ...s, ...done, rows, running: false, finishedAt: at, inFlight: [], nextAt };
+}
+
+const keptKey = (s: ScanState) => (s.target ? targetKey(s.target) : null);
+
+// The scan's rows go under their key at the scan's own stop (none: nothing changes).
+function stashScan(all: Record<string, KeptRows>, s: ScanState): Record<string, KeptRows> {
+  if (!s.target) return all;
+  const stop = s.target.stopId;
+  return { ...all, [stop]: keepEstimate(all[stop] ?? {}, keptKey(s), s.rows, Date.now()) };
+}
+
+function dropKept(all: Record<string, KeptRows>, stop: string, key: string) {
+  const { [key]: _gone, ...rest } = all[stop] ?? {};
+  return { ...all, [stop]: rest };
+}
+
+const pruneAll = (all: Record<string, KeptRows>, now: number) =>
+  Object.fromEntries(
+    Object.entries(all)
+      .map(([stop, m]) => [stop, pruneKept(m, now)] as const)
+      .filter(([, m]) => Object.keys(m).length > 0),
+  );
+
+// The current scan's rows merged with its target's kept ones (a bus the scan does not show keeps
+// its estimate), then the stop's other kept ones, without the ones whose time is past.
+function boardRows(s: ScanState, mine: KeptRows): CrtmRow[] {
+  const key = keptKey(s);
+  const own = key ? (mine[key] ?? []) : [];
+  const others = Object.entries(mine)
+    .filter(([k]) => k !== key)
+    .flatMap(([, rows]) => rows);
+  return freshRows(mergeProjected(mergeBuses(own, s.rows), others), Date.now());
 }
 
 export type LineScanApi = ReturnType<typeof useLineScan>;

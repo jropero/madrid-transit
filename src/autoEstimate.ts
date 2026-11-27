@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
-import { loadArrivalOptions, runScan, type ScanState, type ScanTarget } from './LineScan.tsx';
+import { AUTO_KEY, loadEstimates, saveEstimates } from './estimateStore.ts';
+import {
+  loadArrivalOptions,
+  runScan,
+  targetKey,
+  type ScanState,
+  type ScanTarget,
+} from './LineScan.tsx';
 import {
   byExpected,
   inTimeWindow,
   lineOptions,
   optionFor,
+  freshRows,
+  mergeBuses,
+  pruneKept,
   stopDirections,
   type BusFile,
   type CrtmRow,
@@ -26,7 +36,7 @@ const HOLD_MS = 120_000;
 export type AutoLine = { routeId: string; dest: string; line: string };
 type AutoTarget = { key: string; line: string; t: ScanTarget };
 type ByKey = Record<string, CrtmRow[]>;
-type AutoRows = { stopId: string; byKey: ByKey };
+type AutoRows = Record<string, ByKey>; // stop id -> rows per target key
 export type AutoProgress = {
   line: string;
   i: number;
@@ -136,8 +146,6 @@ console.assert(
   'dueTargets: a line scanned less than 2 min ago waits',
 );
 
-const targetKey = (t: ScanTarget) => `${t.arr ? 'a' : 'd'}|${t.routeId}|${t.head}`;
-
 const optionOf = (opts: LineOption[], l: AutoLine, arrivals: boolean) =>
   arrivals
     ? (opts.find(x => x.routeId === l.routeId) ?? null)
@@ -170,30 +178,21 @@ type Loop = {
   depsRef: RefObject<Departure[]>;
   setRows: Dispatch<SetStateAction<AutoRows>>;
   setProgress: (p: AutoProgress | null) => void;
-  checkedAt: RefObject<Map<string, number>>; // target key -> when it was last scanned
+  checkedAt: Map<string, number>; // this stop's target key -> when it was last scanned
 };
 
-// Applies `f` to this stop's rows (a state from another stop starts empty).
+// Applies `f` to this stop's rows.
 const updateRows = (stopId: string, f: (b: ByKey) => ByKey) => (s: AutoRows) => ({
-  stopId,
-  byKey: f(s.stopId === stopId ? s.byKey : {}),
+  ...s,
+  [stopId]: f(s[stopId] ?? {}),
 });
 
-// A round starts by forgetting this board's rows of lines that are no longer targets (a live bus
-// now covers them, or their runs are gone).
-function pruneRows(c: Loop, targets: AutoTarget[]) {
-  const prefix = c.arrivals ? 'a|' : 'd|';
-  const keep = new Set(targets.map(t => t.key));
-  c.setRows(
-    updateRows(c.stopId, b =>
-      Object.fromEntries(
-        Object.entries(b).filter(([k]) => !k.startsWith(prefix) || keep.has(k)),
-      ),
-    ),
-  );
-}
+// A round starts by dropping this stop's rows whose time is past. Nothing else removes an
+// estimate: not leaving the stop, not a scan that finds nothing (a live row hides it on the
+// board, a newer find replaces it).
+const dropPast = (c: Loop) => c.setRows(updateRows(c.stopId, b => pruneKept(b, Date.now())));
 
-// One line: scans it and replaces its rows with the result (none when the bus is not found).
+// One line: scans it and replaces its rows with the result (not found: the old rows stay).
 // False when cancelled meanwhile.
 async function scanTarget(
   c: Loop,
@@ -212,8 +211,11 @@ async function scanTarget(
   const done = await runScan(tg.t, c.stopId, true, alive, emit);
   if (!alive()) return false;
   const rows = done.rows ?? [];
-  c.checkedAt.current.set(tg.key, Date.now());
-  c.setRows(updateRows(c.stopId, b => ({ ...b, [tg.key]: rows })));
+  c.checkedAt.set(tg.key, Date.now());
+  if (rows.length)
+    c.setRows(
+      updateRows(c.stopId, b => ({ ...b, [tg.key]: mergeBuses(b[tg.key] ?? [], rows) })),
+    );
   return true;
 }
 
@@ -222,8 +224,8 @@ async function round(c: Loop, alive: () => boolean) {
   const lines = autoLines(c.depsRef.current, Date.now(), c.arrivals, single);
   const targets = await resolveTargets(c.file, c.stopId, lines, c.arrivals);
   if (!alive()) return;
-  pruneRows(c, targets);
-  const due = dueTargets(targets, c.checkedAt.current, Date.now());
+  dropPast(c);
+  const due = dueTargets(targets, c.checkedAt, Date.now());
   for (const [i, tg] of due.entries()) {
     if (!(await scanTarget(c, tg, { i: i + 1, n: due.length }, alive))) return;
   }
@@ -250,7 +252,8 @@ const onVisibility = (cb: () => void) => {
 const pageVisible = () => document.visibilityState === 'visible';
 const usePageVisible = () => useSyncExternalStore(onVisibility, pageVisible, () => true);
 
-const NO_ROWS: AutoRows = { stopId: '', byKey: {} };
+const NO_BYKEY: ByKey = {};
+const rowsOf = (byKey: ByKey) => freshRows(Object.values(byKey).flat(), Date.now());
 
 // Automatic estimates for the "por hora" board of a bus / light-rail stop. `file` null = not a
 // bus stop (nothing runs). `depsRef` holds the board's latest departures (read at the start of
@@ -258,7 +261,8 @@ const NO_ROWS: AutoRows = { stopId: '', byKey: {} };
 // (departures pane in view, por hora) and the page is visible and `ready` (the stop's CRTM times
 // are in, so a line without a live row really has none). Leaving any of those cancels the pass
 // in flight (late answers are dropped: each effect run has its own `alive` flag) and keeps the rows found; coming back
-// starts a new round. A stop change forgets everything. `rows` holds both board kinds (`arr`).
+// starts a new round. Rows are kept per stop (a stop change only resets the progress). `rows` are
+// this stop's, both board kinds (`arr`).
 export function useAutoEstimate(p: {
   stopId: string;
   file: BusFile | null;
@@ -268,24 +272,28 @@ export function useAutoEstimate(p: {
   ready: boolean;
 }) {
   const { stopId, file, depsRef, arrivals } = p;
-  const [got, setGot] = useState<AutoRows>(NO_ROWS);
+  const [got, setGot] = useState<AutoRows>(() => loadEstimates(AUTO_KEY));
   const [progress, setProgress] = useState<AutoProgress | null>(null);
   const visible = usePageVisible();
-  const checkedAt = useRef(new Map<string, number>());
+  const checkedAt = useRef(new Map<string, Map<string, number>>()); // per stop
   const on = p.active && p.ready && visible && file !== null;
 
   useEffect(() => {
-    setGot(NO_ROWS);
+    saveEstimates(AUTO_KEY, got);
+  }, [got]);
+
+  useEffect(() => {
     setProgress(null);
-    checkedAt.current = new Map();
   }, [stopId]);
 
   useEffect(() => {
     if (!on || !file) return;
     const run = { live: true }; // cleared by the cleanup: late answers are dropped
     const alive = () => run.live;
+    const mine = checkedAt.current.get(stopId) ?? new Map<string, number>();
+    checkedAt.current.set(stopId, mine);
     void rounds(
-      { stopId, file, arrivals, depsRef, setRows: setGot, setProgress, checkedAt },
+      { stopId, file, arrivals, depsRef, setRows: setGot, setProgress, checkedAt: mine },
       alive,
     );
     return () => {
@@ -294,9 +302,6 @@ export function useAutoEstimate(p: {
     };
   }, [on, file, stopId, arrivals, depsRef]);
 
-  const rows = useMemo(
-    () => (got.stopId === stopId ? Object.values(got.byKey).flat() : []),
-    [got, stopId],
-  );
+  const rows = useMemo(() => rowsOf(got[stopId] ?? NO_BYKEY), [got, stopId]);
   return { rows, status: progress ? autoStatusText(progress) : '' };
 }
