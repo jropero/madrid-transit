@@ -1273,15 +1273,12 @@ p.next {
   }
 }
 
-/* Line scan: a projected time is an estimate, drawn like an unconfirmed one (dashed, not live) */
-.dep.estimated .time,
-.dep.estimated .left {
-  opacity: 0.75;
-}
-
+/* Line scan: a projected time is an estimate from a tracked bus, so it sits between live and
+   "no confirmado": full strength, a solid accent outline (no live dot) */
 .tag.estimated {
   margin-left: 0;
-  border: 1px dashed currentcolor;
+  border: 1px solid var(--accent);
+  color: var(--accent);
   line-height: 1.3;
 }
 

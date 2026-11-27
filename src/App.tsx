@@ -1422,7 +1422,7 @@ export default function App() {
   const { scroller, view, onScroll, goTo } = usePivot();
   const { tt } = useTimetable();
   const { deps: stopFile, error: fileError } = useStopDeps(nav.stop.id);
-  const scan = useLineScan(nav.stop.id, () => goTo('departures'));
+  const scan = useLineScan(nav.stop.id);
 
   function updateStops(next: Saved[]) {
     setStops(next);

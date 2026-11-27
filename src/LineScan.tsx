@@ -145,15 +145,10 @@ async function runScan(
 // Scan state of the selected stop. Reset when the stop changes; `start` begins a scan,
 // `stop` cancels it (late answers are ignored through the generation counter) and forgets
 // the target and the estimate.
-// `onHit` runs once when a scan started with "escanear" finds a bus (not on the repeats).
-export function useLineScan(stopId: string, onHit?: () => void) {
+export function useLineScan(stopId: string) {
   const [state, setState] = useState<ScanState>(EMPTY);
   const gen = useRef(0);
   const busy = useRef(false);
-  const hitRef = useRef(onHit);
-  useEffect(() => {
-    hitRef.current = onHit;
-  }, [onHit]);
 
   useEffect(() => {
     gen.current++;
@@ -173,7 +168,6 @@ export function useLineScan(stopId: string, onHit?: () => void) {
       const at = Date.now();
       const nextAt = done.hit ? at + FOLLOW_MS : null;
       setState(s => ({ ...s, ...done, running: false, finishedAt: at, inFlight: [], nextAt }));
-      if (!again && done.hit) hitRef.current?.();
     },
     [stopId],
   );
