@@ -84,7 +84,7 @@ const VIEWS = ['departures', 'line', 'settings'] as const;
 type View = (typeof VIEWS)[number];
 const VIEW_LABEL: Record<View, string> = {
   departures: 'salidas',
-  line: 'línea',
+  line: 'escáner',
   settings: 'ajustes',
 };
 
@@ -1425,7 +1425,7 @@ export default function App() {
   const { scroller, view, onScroll, goTo } = usePivot();
   const { tt } = useTimetable();
   const { deps: stopFile, error: fileError } = useStopDeps(nav.stop.id);
-  const scan = useLineScan(nav.stop.id);
+  const scan = useLineScan(nav.stop.id, () => goTo('departures'));
 
   function updateStops(next: Saved[]) {
     setStops(next);

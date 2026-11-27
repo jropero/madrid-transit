@@ -29,7 +29,7 @@ import {
   type StopFile,
 } from './gtfs.ts';
 
-// The line scan (pivot "línea"): walk back along a line from the selected stop to the nearest
+// The line scan (pivot "escáner"): walk back along a line from the selected stop to the nearest
 // earlier stop with a live bus and project its time onto the selected stop. Started only from
 // the tab; at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS.
 const BATCH = 3;
@@ -137,10 +137,15 @@ async function runScan(
 // Scan state of the selected stop. Reset when the stop changes; `start` begins a scan,
 // `stop` cancels it (late answers are ignored through the generation counter) and forgets
 // the target and the estimate.
-export function useLineScan(stopId: string) {
+// `onHit` runs once when a scan started with "escanear" finds a bus (not on the repeats).
+export function useLineScan(stopId: string, onHit?: () => void) {
   const [state, setState] = useState<ScanState>(EMPTY);
   const gen = useRef(0);
   const busy = useRef(false);
+  const hitRef = useRef(onHit);
+  useEffect(() => {
+    hitRef.current = onHit;
+  }, [onHit]);
 
   useEffect(() => {
     gen.current++;
@@ -158,6 +163,7 @@ export function useLineScan(stopId: string) {
       if (!alive()) return;
       busy.current = false;
       setState(s => ({ ...s, ...done, running: false, finishedAt: Date.now() }));
+      if (!again && done.hit) hitRef.current?.();
     },
     [stopId],
   );
@@ -419,7 +425,7 @@ function ScanControls(p: {
   );
 }
 
-// Pivot "línea": scans the selected stop's line from the tab (see the header comment).
+// Pivot "escáner": scans the selected stop's line from the tab (see the header comment).
 export default function LineTab(p: {
   stop: Saved;
   file: StopFile | null;
