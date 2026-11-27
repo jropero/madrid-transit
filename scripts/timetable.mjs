@@ -1125,6 +1125,81 @@ function busFiles(trips, byTrip, cals, pats) {
   return files;
 }
 
+// The stops a pattern still serves from `stopId` on (its first visit), as one key.
+function restKey(pats, routeId, pi, stopId) {
+  const p = pats.routes.get(routeId)?.list[pi] ?? [];
+  const i = p.findIndex(([id]) => id === stopId);
+  return i < 0
+    ? ''
+    : p
+        .slice(i)
+        .map(([id]) => id)
+        .join();
+}
+
+// Headsigns of one route at a stop whose trips serve the same remaining stops are one
+// destination there: 471 "PINTO" and "PINTO (por ctra. A-42)" only differ before 16578, so the
+// board showed the same service twice (and split its live and timetable times). Their rows take
+// the most common headsign of the group (ties: the one listed first). Returns how many groups
+// were merged.
+function mergeSameRest(stopId, f, pats) {
+  const keyOf = row => `${row[2]}|${restKey(pats, f.r[row[2]], row[4], stopId)}`;
+  const groups = new Map(); // route|rest -> Map(headsign index -> rows)
+  for (const row of f.d) {
+    const m = groups.get(keyOf(row)) ?? new Map();
+    m.set(row[3], (m.get(row[3]) ?? 0) + 1);
+    groups.set(keyOf(row), m);
+  }
+  const winner = new Map();
+  for (const [key, m] of groups) {
+    if (m.size > 1) winner.set(key, [...m].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0]);
+  }
+  for (const row of f.d) row[3] = winner.get(keyOf(row)) ?? row[3];
+  return winner.size;
+}
+
+function sameRestHeads(files, pats) {
+  let n = 0;
+  for (const [stopId, f] of files) n += mergeSameRest(stopId, f, pats);
+  return n;
+}
+console.assert(
+  (() => {
+    const pats = makePatterns();
+    const long = pats.add('R', [
+      ['u', 0],
+      ['v', 60],
+      ['s', 120],
+      ['x', 180],
+      ['y', 240],
+    ]);
+    const short = pats.add('R', [
+      ['w', 0],
+      ['s', 60],
+      ['x', 120],
+      ['y', 180],
+    ]);
+    const other = pats.add('R', [
+      ['u', 0],
+      ['s', 60],
+      ['z', 120],
+    ]);
+    const f = {
+      r: ['R'],
+      h: ['PINTO', 'PINTO (por A-42)', 'PARLA'],
+      d: [
+        [1, 0, 0, 0, long],
+        [2, 0, 0, 0, long],
+        [3, 0, 0, 1, short],
+        [4, 0, 0, 2, other],
+      ],
+    };
+    const merged = mergeSameRest('s', f, pats);
+    return merged === 1 && f.d.map(r => r[3]).join() === '0,0,0,2';
+  })(),
+  'mergeSameRest: same remaining stops, one headsign',
+);
+
 // Per-stop merge of two bus stop files (interurban + town): routes, headsigns and calendars are
 // unioned and the rows of `b` re-pointed at the merged indices. Pattern indices stay valid because
 // the two feeds never share a route id (patterns are per route).
@@ -1212,6 +1287,8 @@ async function buildCrtm(feed) {
   if (fixed) console.log(`${feed.label}: ${fixed} short-name destinations replaced`);
   const pats = makePatterns();
   const files = busFiles(trips, byTrip, cals, pats);
+  const same = sameRestHeads(files, pats);
+  if (same) console.log(`${feed.label}: ${same} headsigns merged (same remaining stops)`);
   const stops = await busStops(zip, files, feed);
   return { routes, stops, files, pats, trips: trips.size };
 }
