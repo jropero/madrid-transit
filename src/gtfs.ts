@@ -99,6 +99,7 @@ export type Departure = {
   estFrom?: string; // estimated rows: the stop id the live bus was seen at
   distM?: number; // EMT only: distance of the bus to the stop, metres
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
+  endStop?: string; // CRTM rows: the trip's last stop (`par_<code>`), to pick its pattern
 };
 
 // Per-stop update, slimmed to a delay (seconds) or an absolute time (unix seconds, a string).
@@ -963,6 +964,7 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   text: routes[r.routeId]?.text ?? '#ffffff',
   dest: r.dest,
   pi: r.pi,
+  endStop: r.code ? `par_${r.code}` : undefined,
   bus: true,
   tram: r.tram,
   urban: routes[r.routeId]?.urban,
@@ -2448,13 +2450,16 @@ const sameName = (a: string, b: string) => {
 };
 
 // Pattern for live rows that carry no pattern index (Metro, EMT, CRTM): among the patterns that
-// still have stops after `stopId`, the longest whose last stop is named like the destination,
-// else the longest. Returns an index, or -1 when no pattern contains the stop.
+// still have stops after `stopId`, the longest that ends at `endId` (CRTM's destination stop,
+// when known: 460 runs to PARLA end at La Ballena, a name the headsign doesn't match), else the
+// longest whose last stop is named like the destination, else the longest. Returns an index, or
+// -1 when no pattern contains the stop.
 export function pickPattern(
   patterns: Pattern[],
   stopId: string,
   dest: string,
   nameOf: (id: string) => string | undefined,
+  endId?: string,
 ): number {
   const longest = (ok: (p: Pattern) => boolean) => {
     let best = -1;
@@ -2465,6 +2470,8 @@ export function pickPattern(
     });
     return best;
   };
+  const ends = endId ? longest(p => p.at(-1)?.[0] === endId) : -1;
+  if (ends >= 0) return ends;
   const named = dest ? longest(p => sameName(nameOf(p.at(-1)?.[0] ?? '') ?? '', dest)) : -1;
   return named >= 0 ? named : longest(() => true);
 }
@@ -2529,6 +2536,8 @@ console.assert(
       pickPattern([short, long], 'a', 'de', nameOf) === 1 &&
       pickPattern([short, long], 'a', 'calle c', nameOf) === 0 &&
       pickPattern([short, long], 'a', 'nowhere', nameOf) === 1 &&
+      pickPattern([short, long], 'a', 'nowhere', nameOf, 'c') === 0 &&
+      pickPattern([short, long], 'a', 'de', nameOf, 'zz') === 1 &&
       pickPattern([short, long], 'd', '', nameOf) === -1 &&
       pickPattern([short, long], 'zz', '', nameOf) === -1
     );

@@ -40,10 +40,11 @@ function choose(
   stopId: string,
   patterns: Pattern[],
   names: Map<string, string>,
+  endStop?: string,
 ) {
   if (pi !== undefined) return patterns[pi] ?? null;
   const name = names.get(dest) ?? dest;
-  return patterns[pickPattern(patterns, stopId, name, id => names.get(id))] ?? null;
+  return patterns[pickPattern(patterns, stopId, name, id => names.get(id), endStop)] ?? null;
 }
 
 // Per stop: its town when it differs from the last known one (`start` = the current stop's), else ''.
@@ -74,19 +75,19 @@ function PlainStops({
   onSelect: (s: { id: string; name: string }, el: HTMLElement) => void;
 }) {
   const [loaded, setLoaded] = useState<Loaded | 'error' | 'offline' | null>(null);
-  const { routeId, pi, dest } = dep;
+  const { routeId, pi, dest, endStop } = dep;
   useEffect(() => {
     let current = true;
     Promise.all([loadRoute(routeId), loadStopNames(), loadStopTowns()]).then(
       ([route, names, towns]) =>
         current &&
-        setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names, towns }),
+        setLoaded({ pattern: choose(pi, dest, stopId, route.p, names, endStop), names, towns }),
       err => current && setLoaded(isOffline(err) ? 'offline' : 'error'),
     );
     return () => {
       current = false;
     };
-  }, [routeId, pi, dest, stopId]);
+  }, [routeId, pi, dest, endStop, stopId]);
 
   if (!loaded)
     return (
