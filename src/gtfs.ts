@@ -1064,15 +1064,32 @@ export function mergeCrtm(
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
 
-// CRTM rows not live (timetable times) with a live row of the same route and destination after
-// them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked 15:55:35).
+// CRTM rows not live (timetable times) with a tracked bus of the same route and destination
+// after them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked
+// 15:55:35). A line-scan estimate is a tracked bus too (seen live at an earlier stop).
+const tracked = (d: Departure) => d.live || !!d.estimated;
 function markUnconfirmed(crtm: Departure[]): Departure[] {
   const trackedLater = (d: Departure) =>
     crtm.some(
-      o => o.live && o.routeId === d.routeId && o.dest === d.dest && o.expected > d.expected,
+      o =>
+        tracked(o) && o.routeId === d.routeId && o.dest === d.dest && o.expected > d.expected,
     );
-  return crtm.map(d => (!d.live && trackedLater(d) ? { ...d, unconfirmed: true } : d));
+  return crtm.map(d => (!tracked(d) && trackedLater(d) ? { ...d, unconfirmed: true } : d));
 }
+console.assert(
+  (() => {
+    const at = (m: number) => new Date(Date.UTC(2026, 10, 27, 20, m));
+    const row = (m: number, extra: Partial<Departure>) =>
+      ({ routeId: 'r', dest: 'X', expected: at(m), live: false, ...extra }) as Departure;
+    const [sched, est, later] = markUnconfirmed([
+      row(5, {}),
+      row(16, { estimated: true }),
+      row(30, {}),
+    ]);
+    return !!sched.unconfirmed && !est.unconfirmed && !later.unconfirmed;
+  })(),
+  'markUnconfirmed: timetable times before an estimate are unconfirmed',
+);
 
 console.assert(
   (() => {
