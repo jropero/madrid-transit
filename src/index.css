@@ -156,19 +156,20 @@ button {
   position: relative;
   flex: 1;
   min-height: 0;
-  display: flex;
-  overflow: auto hidden;
-  scroll-snap-type: x mandatory;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
+  overflow: hidden;
+  touch-action: pan-y;
+  overscroll-behavior-x: none;
+}
+
+.panes.settling .pane {
+  transition: transform 250ms ease-out;
 }
 
 .pane {
-  flex: 0 0 100%;
-  min-width: 0;
+  position: absolute;
+  inset: 0;
   overflow-y: auto;
-  scroll-snap-align: start;
-  scroll-snap-stop: always;
+  touch-action: pan-y;
   padding: 8px var(--gutter) calc(112px + env(safe-area-inset-bottom));
 }
 
@@ -781,6 +782,7 @@ p.next {
   .dest .live::before,
   .toast span,
   .turn,
+  .panes.settling .pane,
   .bar-menu,
   .views-row,
   .scan-chip.checking {

@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
+import { usePivot } from './pivot.ts';
 import AlertsTab from './AlertsTab.tsx';
 import LineTab, { useLineScan } from './LineScan.tsx';
 import Settings from './Settings.tsx';
@@ -690,7 +691,7 @@ function StopsRow({
   // Nothing to switch to: the title below already names the stop.
   if (row.length < 2) return null;
   return (
-    <nav className="stops" aria-label="Paradas guardadas">
+    <nav className="stops" aria-label="Paradas guardadas" data-no-swipe>
       {row.map(s => (
         <button
           key={s.id}
@@ -1253,8 +1254,6 @@ function Departures({
   );
 }
 
-const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
 // Wall clock for countdowns, ticking independently of the 30s data refresh.
 function useNow(tickMs = 10_000) {
   const [now, setNow] = useState(() => Date.now());
@@ -1286,43 +1285,8 @@ function syncHistory(next: View) {
   }
 }
 
-// Swipe pivot state: native scroll-snap drives `view`; header taps scroll to the pane.
-function usePivot() {
-  const scroller = useRef<HTMLDivElement>(null);
-  const frame = useRef(0);
-  const viewRef = useRef<View>('departures');
-  const [view, setView] = useState<View>('departures');
-
-  const onScroll = () => {
-    if (frame.current) return;
-    frame.current = requestAnimationFrame(() => {
-      frame.current = 0;
-      const el = scroller.current;
-      const next = el && VIEWS[Math.round(el.scrollLeft / el.clientWidth)];
-      if (!next || next === viewRef.current) return;
-      viewRef.current = next;
-      syncHistory(next);
-      setView(next);
-    });
-  };
-
-  const goTo = (v: View) => {
-    const el = scroller.current;
-    el?.scrollTo({
-      left: VIEWS.indexOf(v) * el.clientWidth,
-      behavior: reducedMotion() ? 'auto' : 'smooth',
-    });
-  };
-
-  // System back (Android gesture, iOS swipe-back, browser button) returns to departures.
-  useEffect(() => {
-    const onPop = () => goTo(pivotState()?.view ?? 'departures');
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, []);
-
-  return { scroller, view, onScroll, goTo };
-}
+const usePivotViews = () =>
+  usePivot<View>(VIEWS, syncHistory, () => pivotState()?.view ?? 'departures');
 
 // Big lowercase headers, looping like a Windows Phone pivot: the active one comes first,
 // the rest follow in order and wrap around.
@@ -1419,7 +1383,7 @@ export default function App() {
   const { nav, select, jump, toast } = useStopNav(stops[0]);
   useWarmOffline(stops.map(s => s.id));
   usePrefetchLive(stops);
-  const { scroller, view, onScroll, goTo } = usePivot();
+  const { ref, view, goTo, paneStyle, paneIn, drag } = usePivotViews();
   const { tt } = useTimetable();
   const { deps: stopFile, error: fileError } = useStopDeps(nav.stop.id);
   const scan = useLineScan(nav.stop.id);
@@ -1430,8 +1394,13 @@ export default function App() {
   }
 
   const pane = (v: View, children: React.ReactNode) => (
-    <section className="pane" aria-label={VIEW_LABEL[v]} inert={view !== v}>
-      <div className={v === 'departures' ? 'pane-in turn' : 'pane-in'}>{children}</div>
+    <section
+      className="pane"
+      aria-label={VIEW_LABEL[v]}
+      inert={view !== v}
+      style={paneStyle(v)}
+    >
+      <div {...paneIn(v)}>{children}</div>
     </section>
   );
 
@@ -1439,7 +1408,7 @@ export default function App() {
     <main className="app">
       <p className="brand">Madrid Transit</p>
       <PivotHeader view={view} onSelect={goTo} />
-      <div className="panes" ref={scroller} onScroll={onScroll}>
+      <div className="panes" ref={ref} {...drag}>
         {pane(
           'departures',
           <Departures
