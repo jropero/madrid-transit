@@ -2282,6 +2282,26 @@ export function lineOptions(file: BusFile): LineOption[] {
     .sort((a, b) => a.routeId.localeCompare(b.routeId, 'es', { numeric: true }));
 }
 
+// The scan option for a departure's line: same route and headsign, else the route's first.
+export const optionFor = (opts: LineOption[], routeId: string, head: string) =>
+  opts.find(o => o.routeId === routeId && o.head === head) ??
+  opts.find(o => o.routeId === routeId) ??
+  null;
+console.assert(
+  (() => {
+    const opts = [
+      { routeId: 'r', head: 'A', pi: 0 },
+      { routeId: 'r', head: 'B', pi: 1 },
+    ];
+    return (
+      optionFor(opts, 'r', 'B')?.pi === 1 &&
+      optionFor(opts, 'r', 'X')?.pi === 0 &&
+      optionFor(opts, 'z', 'A') === null
+    );
+  })(),
+  'optionFor',
+);
+
 // The stops before `stopId` in the pattern, nearest first, at most `max` (default: all of them,
 // back to the first stop; a stop repeated on a circular line is not its own upstream).
 export function scanOrder(p: Pattern, stopId: string, max = Infinity): ScanStop[] {

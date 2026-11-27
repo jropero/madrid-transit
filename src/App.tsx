@@ -1,4 +1,13 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  Fragment,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
@@ -47,6 +56,8 @@ import {
   ddmm,
   hhmm,
   isBus,
+  lineOptions,
+  optionFor,
   liveStatusText,
   staleText,
   loadSaved,
@@ -500,6 +511,23 @@ const modeLabel = (d: Departure) => {
   return d.bus ? 'bus' : 'cercanías';
 };
 
+// "estima tiempo" on a bus / light-rail line without live times: starts the escáner scan for
+// that line + direction and shows the escáner tab (provided by App; null where not possible).
+const EstimateCtx = createContext<((d: Departure) => void) | null>(null);
+
+function EstimateButton({ list, from }: { list: Departure[]; from: boolean }) {
+  const estimate = useContext(EstimateCtx);
+  const head = list[0];
+  if (!estimate || from || !head.bus || list.some(d => d.live)) return null;
+  return (
+    <div className="board-mode estimate">
+      <button className="btn tilt" onClick={() => estimate(head)}>
+        estima tiempo
+      </button>
+    </div>
+  );
+}
+
 // A line and its next departures; tapping it lists the remaining stops of the next one.
 function LineGroup({
   list,
@@ -562,6 +590,7 @@ function LineGroup({
               onPick={setPicked}
             />
           )}
+          <EstimateButton list={list} from={from} />
           <NextStops
             key={followed.tripId}
             dep={followed}
@@ -1393,6 +1422,17 @@ export default function App() {
     saveSaved(next);
   }
 
+  // "estima tiempo" in a line group: scan that line + direction from this stop, on escáner.
+  const stopId = nav.stop.id;
+  const estimate = isBus(stopFile)
+    ? (d: Departure) => {
+        const o = optionFor(lineOptions(stopFile), d.routeId, d.dest);
+        if (!o) return;
+        scan.start({ stopId, ...o });
+        goTo('line');
+      }
+    : null;
+
   const pane = (v: View, children: React.ReactNode) => (
     <section
       className="pane"
@@ -1411,15 +1451,17 @@ export default function App() {
       <div className="panes" ref={ref} {...drag}>
         {pane(
           'departures',
-          <Departures
-            stops={stops}
-            nav={nav}
-            active={view === 'departures'}
-            onSelect={select}
-            onJump={jump}
-            onStops={updateStops}
-            projected={scan.state.rows}
-          />,
+          <EstimateCtx value={estimate}>
+            <Departures
+              stops={stops}
+              nav={nav}
+              active={view === 'departures'}
+              onSelect={select}
+              onJump={jump}
+              onStops={updateStops}
+              projected={scan.state.rows}
+            />
+          </EstimateCtx>,
         )}
         {pane(
           'line',
