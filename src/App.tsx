@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import AppBar, { type BarAction } from './AppBar.tsx';
 import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
+import LineTab, { useLineScan } from './LineScan.tsx';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
 import { useLdEnabled } from './ld.ts';
@@ -37,6 +38,7 @@ import {
   compareLines,
   daysUntil,
   emtDepartures,
+  estimateRows,
   emtFromCrtm,
   fmtDist,
   ddmm,
@@ -61,6 +63,7 @@ import {
   saveSaved,
   scheduled,
   searchStops,
+  stopDirections,
   short,
   townsOf,
   upcoming,
@@ -77,9 +80,13 @@ import {
   type TripUpdates,
 } from './gtfs.ts';
 
-const VIEWS = ['departures', 'settings'] as const;
+const VIEWS = ['departures', 'line', 'settings'] as const;
 type View = (typeof VIEWS)[number];
-const VIEW_LABEL: Record<View, string> = { departures: 'salidas', settings: 'ajustes' };
+const VIEW_LABEL: Record<View, string> = {
+  departures: 'salidas',
+  line: 'línea',
+  settings: 'ajustes',
+};
 
 // "Madrid-Atocha Cercanías" -> "Atocha Cercanías" for compact headers.
 
@@ -444,17 +451,28 @@ function groupDepartures(
   );
 }
 
+// Row state classes: cancelled, live, unconfirmed (CRTM timetable time), estimated (line scan).
+const depClass = (d: Departure) =>
+  [
+    'dep',
+    d.cancelled && 'cancelled',
+    d.live && 'is-live',
+    d.unconfirmed && 'unconfirmed',
+    d.estimated && 'estimated',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
 function DepartureRow({ d, now }: { d: Departure; now: number }) {
   const delay = Math.round((d.expected.getTime() - d.planned.getTime()) / 60000);
   const left = Math.max(0, Math.floor((d.expected.getTime() - now) / 60000));
   return (
-    <span
-      className={`dep${d.cancelled ? ' cancelled' : ''}${d.live ? ' is-live' : ''}${d.unconfirmed ? ' unconfirmed' : ''}`}
-    >
+    <span className={depClass(d)}>
       {d.live && <span className="dot" aria-hidden="true" />}
       <span className="when">
         <span className="time">{hhmm(d.planned)}</span>
         {d.unconfirmed && <span className="tag unconfirmed">no confirmado</span>}
+        {d.estimated && <span className="tag estimated">estimado</span>}
       </span>
       {d.live && <span className="sr-only"> en vivo</span>}
       {delay > 0 && !d.cancelled && <span className="late">+{delay}'</span>}
@@ -740,6 +758,7 @@ type Sources = {
   metro: boolean;
   ld: boolean;
   arrivals: string | null; // arrivals board (Renfe station or bus/tram terminus): the stop id
+  projected: CrtmRow[]; // line scan: live rows of an earlier stop projected onto this stop
 };
 
 // The arrivals board: Renfe from the timetable plus GTFS-RT, bus and tram termini from CRTM
@@ -748,6 +767,13 @@ function arrivalsAt(tt: Timetable, src: Sources, list: StopFile, at: Date): Depa
   if (isBus(list)) return mergeCrtm([], src.crtm, tt.routes, at);
   const arr = renfeArrivals(list, tt.days, tt.routes, at, src.ld, src.arrivals ?? '');
   return dedupeLd(applyRealtime(arr, src.trips), true);
+}
+
+// Own CRTM rows plus the scan's projected rows for the lines the stop has no live row for.
+function withEstimates(src: Sources, list: StopFile, at: Date): CrtmRow[] | null {
+  if (!src.crtm || !src.projected.length || !isBus(list)) return src.crtm;
+  const single = (id: string) => stopDirections(list, id).length === 1;
+  return [...src.crtm, ...estimateRows(src.projected, src.crtm, at, single)];
 }
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
@@ -759,22 +785,26 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   const planned = scheduled(src.list, tt.days, tt.routes, at, src.ld);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
   return isBus(src.list)
-    ? mergeCrtm(planned, src.crtm, tt.routes, at)
+    ? mergeCrtm(planned, withEstimates(src, src.list, at), tt.routes, at)
     : dedupeLd(applyRealtime(planned, src.trips));
 }
 
 function useDepartureList(tt: Timetable | null, src: Sources) {
   const now = useNow();
-  const { list, trips, crtm, emt, metro, ld, arrivals } = src;
+  const { list, trips, crtm, emt, metro, ld, arrivals, projected } = src;
   const deps = useMemo(
     () =>
       tt
         ? upcoming(
-            departuresAt(tt, { list, trips, crtm, emt, metro, ld, arrivals }, new Date(now)),
+            departuresAt(
+              tt,
+              { list, trips, crtm, emt, metro, ld, arrivals, projected },
+              new Date(now),
+            ),
             now,
           )
         : [],
-    [tt, list, trips, crtm, emt, metro, ld, arrivals, now],
+    [tt, list, trips, crtm, emt, metro, ld, arrivals, projected, now],
   );
   return { deps, now };
 }
@@ -1002,9 +1032,11 @@ function Departures({
   onSelect,
   onJump,
   onStops,
+  projected,
 }: {
   stops: Saved[];
   nav: Nav;
+  projected: CrtmRow[];
   active: boolean;
   onSelect: (s: Saved) => void;
   onJump: (s: Saved, openLine?: string) => void;
@@ -1050,6 +1082,7 @@ function Departures({
     metro: isMetro,
     ld,
     arrivals: arrivalsAt,
+    projected,
   });
   const statusText = rt.statusText(deps.some(d => d.live));
   const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
@@ -1390,6 +1423,9 @@ export default function App() {
   useWarmOffline(stops.map(s => s.id));
   usePrefetchLive(stops);
   const { scroller, view, onScroll, goTo } = usePivot();
+  const { tt } = useTimetable();
+  const { deps: stopFile, error: fileError } = useStopDeps(nav.stop.id);
+  const scan = useLineScan(nav.stop.id);
 
   function updateStops(next: Saved[]) {
     setStops(next);
@@ -1416,6 +1452,17 @@ export default function App() {
             onSelect={select}
             onJump={jump}
             onStops={updateStops}
+            projected={scan.state.rows}
+          />,
+        )}
+        {pane(
+          'line',
+          <LineTab
+            stop={nav.stop}
+            file={stopFile}
+            fileError={fileError}
+            routes={tt?.routes ?? null}
+            scan={scan}
           />,
         )}
         {pane('settings', <Settings stops={stops} onStops={updateStops} />)}

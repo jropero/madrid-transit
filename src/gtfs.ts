@@ -95,6 +95,8 @@ export type Departure = {
   // A CRTM timetable time (no estimate) before a tracked bus of the same line and destination:
   // CRTM lost that bus, or the tracked one is it running late (shown as "no confirmado").
   unconfirmed?: boolean;
+  estimated?: boolean; // projected from a live bus at an earlier stop (line scan), not live here
+  estFrom?: string; // estimated rows: the stop id the live bus was seen at
   distM?: number; // EMT only: distance of the bus to the stop, metres
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
 };
@@ -848,6 +850,8 @@ export type CrtmRow = {
   metro: boolean;
   issue: string;
   scheduled?: boolean; // a bus time on the whole minute: CRTM's timetable, not an estimate
+  estimated?: true; // projected from a live bus at an earlier stop of the line (line scan)
+  from?: string; // estimated rows: the stop id the live bus was seen at
 };
 
 const many = <T>(v: One<T> | undefined): T[] => {
@@ -967,7 +971,9 @@ const crtmDeparture = (r: CrtmRow, i: number, routes: RouteMap): Departure => ({
   expected: r.when,
   cancelled: false,
   // A whole-minute bus time still stands for (and replaces) its timetable run, but is not live.
-  live: !r.scheduled,
+  live: !r.scheduled && !r.estimated,
+  estimated: r.estimated,
+  estFrom: r.from,
 });
 
 // Replacement bucket of a live row: its route and, when its destination is the headsign of one of
@@ -2173,6 +2179,172 @@ const stopsAfter = (p: Pattern, stopId: string) => {
   const i = stopIndex(p, stopId);
   return i < 0 ? 0 : p.length - 1 - i;
 };
+
+// Line scan: a bus stop with no live CRTM times borrows the nearest earlier stop of the line
+// that has a live bus and projects that bus's time forward with the pattern's offsets.
+export const SCAN_MAX = 12;
+export type LineOption = { routeId: string; head: string; pi: number };
+export type ScanStop = { id: string; off: number };
+
+const topCount = (counts: Map<number, number>) =>
+  [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+
+// Distinct (route, headsign) pairs of a bus stop file, each with its most common pattern.
+export function lineOptions(file: BusFile): LineOption[] {
+  const groups = new Map<string, LineOption & { counts: Map<number, number> }>();
+  for (const [, , r, h, pi] of file.d) {
+    const key = `${r}|${h}`;
+    const g = groups.get(key) ?? {
+      routeId: file.r[r],
+      head: file.h[h],
+      pi: 0,
+      counts: new Map<number, number>(),
+    };
+    if (pi !== undefined) g.counts.set(pi, (g.counts.get(pi) ?? 0) + 1);
+    groups.set(key, g);
+  }
+  return [...groups.values()]
+    .map(g => ({ routeId: g.routeId, head: g.head, pi: topCount(g.counts) }))
+    .sort((a, b) => a.routeId.localeCompare(b.routeId, 'es', { numeric: true }));
+}
+
+// The stops before `stopId` in the pattern, nearest first, at most `max` (a stop repeated on a
+// circular line is not its own upstream).
+export function scanOrder(p: Pattern, stopId: string, max = SCAN_MAX): ScanStop[] {
+  const i = stopIndex(p, stopId);
+  if (i <= 0) return [];
+  return p
+    .slice(0, i)
+    .filter(([id]) => id !== stopId)
+    .slice(-max)
+    .reverse()
+    .map(([id, off]) => ({ id, off }));
+}
+
+// Live rows of the line + direction at an upstream stop. Whole-minute bus rows are CRTM's
+// timetable. `single`: the stop has just one direction of the route, so CRTM's own destination
+// text (not the headsign) is what the rows carry.
+export const liveMatches = (rows: CrtmRow[], routeId: string, head: string, single: boolean) =>
+  rows.filter(
+    r => r.routeId === routeId && !r.scheduled && !r.estimated && (single || r.dest === head),
+  );
+
+// Project live rows seen at `from` onto `here` (same pattern, offset difference), as rows of
+// the target direction.
+export function projectRows(
+  rows: CrtmRow[],
+  p: Pattern,
+  from: string,
+  here: string,
+  target: { head: string; pi: number },
+): CrtmRow[] {
+  const iu = stopIndex(p, from);
+  const ih = stopIndex(p, here);
+  if (iu < 0 || ih < 0) return [];
+  const shift = (p[ih][1] - p[iu][1]) * 1000;
+  return rows.map(r => ({
+    ...r,
+    when: new Date(r.when.getTime() + shift),
+    dest: target.head,
+    pi: target.pi,
+    scheduled: false,
+    estimated: true,
+    from,
+  }));
+}
+
+// Projected rows worth showing: only for a route + headsign the stop's own CRTM rows have no
+// live row for inside [now - 1 min, now + 2 h] (the stop's own data always wins). `single`
+// tells whether the stop has one direction of the route (then only the route is compared).
+export function estimateRows(
+  projected: CrtmRow[],
+  own: CrtmRow[],
+  now: Date,
+  single: (routeId: string) => boolean,
+): CrtmRow[] {
+  const from = now.getTime() - 60_000;
+  const to = now.getTime() + HORIZON_MS;
+  const covered = (p: CrtmRow) =>
+    own.some(
+      o =>
+        !o.scheduled &&
+        o.routeId === p.routeId &&
+        (single(p.routeId) || o.dest === p.dest) &&
+        o.when.getTime() >= from &&
+        o.when.getTime() <= to,
+    );
+  return projected.filter(p => !covered(p));
+}
+
+console.assert(
+  (() => {
+    const file: BusFile = {
+      kind: 'bus',
+      r: ['A', 'B'],
+      h: ['X', 'Y'],
+      c: [],
+      d: [
+        [0, 0, 0, 0, 2],
+        [1, 0, 0, 0, 3],
+        [2, 0, 0, 0, 3],
+        [3, 0, 1, 1, 0],
+      ],
+    };
+    const opts = lineOptions(file);
+    const pat: Pattern = [
+      ['a', 0],
+      ['b', 60],
+      ['c', 180],
+      ['d', 300],
+      ['e', 420],
+    ];
+    const order = scanOrder(pat, 'd');
+    const t0 = new Date('2026-11-26T15:00:30Z');
+    const row = (routeId: string, dest: string, scheduled = false): CrtmRow => ({
+      when: t0,
+      routeId,
+      line: routeId,
+      dest,
+      tram: false,
+      metro: false,
+      issue: '',
+      scheduled,
+    });
+    const hits = liveMatches(
+      [row('A', 'X'), row('A', 'Z'), row('B', 'X'), row('A', 'X', true)],
+      'A',
+      'X',
+      false,
+    );
+    const proj = projectRows(hits, pat, 'b', 'd', { head: 'X', pi: 3 });
+    const now = new Date('2026-11-26T15:00:00Z');
+    return (
+      opts.length === 2 &&
+      opts[0].routeId === 'A' &&
+      opts[0].pi === 3 &&
+      opts[1].pi === 0 &&
+      order.map(o => o.id).join() === 'c,b,a' &&
+      order[0].off === 180 &&
+      scanOrder(pat, 'd', 2).length === 2 &&
+      scanOrder(pat, 'a').length === 0 &&
+      scanOrder(pat, 'zz').length === 0 &&
+      hits.length === 1 &&
+      liveMatches([row('A', 'Z')], 'A', 'X', true).length === 1 &&
+      proj.length === 1 &&
+      proj[0].when.toISOString() === '2026-11-26T15:04:30.000Z' &&
+      proj[0].estimated === true &&
+      proj[0].from === 'b' &&
+      proj[0].pi === 3 &&
+      projectRows(hits, pat, 'zz', 'd', { head: 'X', pi: 3 }).length === 0 &&
+      estimateRows(proj, [], now, () => false).length === 1 &&
+      estimateRows(proj, [row('A', 'X')], now, () => false).length === 0 &&
+      estimateRows(proj, [row('A', 'Q')], now, () => false).length === 1 &&
+      estimateRows(proj, [row('A', 'Q')], now, () => true).length === 0 &&
+      estimateRows(proj, [row('A', 'X', true)], now, () => false).length === 1
+    );
+  })(),
+  'line scan: lineOptions, scanOrder, liveMatches, projectRows, estimateRows',
+);
 
 // Accent-insensitive, either name may contain the other ("PINAR DE CHAMARTIN" vs "Pinar de Chamartín").
 const sameName = (a: string, b: string) => {
