@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { Dispatch, RefObject, SetStateAction } from 'react';
 import { loadArrivalOptions, runScan, type ScanState, type ScanTarget } from './LineScan.tsx';
 import {
@@ -19,6 +19,9 @@ import {
 // Separate from `useLineScan` (the escáner tab keeps working as it is).
 const MAX_TARGETS = 6;
 const ROUND_GAP_MS = 30_000;
+// A line just scanned is not scanned again for this long, found or not (an estimate stands
+// meanwhile; a line without a live bus upstream rarely gets one within a round's 30 s).
+const HOLD_MS = 120_000;
 
 export type AutoLine = { routeId: string; dest: string; line: string };
 type AutoTarget = { key: string; line: string; t: ScanTarget };
@@ -111,6 +114,28 @@ console.assert(
   'autoLines, nextTally, autoStatusText',
 );
 
+// The targets a round scans: all but those scanned less than HOLD_MS ago (their rows stay).
+export const dueTargets = <T extends { key: string }>(
+  targets: T[],
+  checkedAt: Map<string, number>,
+  now: number,
+) => targets.filter(t => now - (checkedAt.get(t.key) ?? -Infinity) >= HOLD_MS);
+console.assert(
+  (() => {
+    const ts = [{ key: 'a' }, { key: 'b' }, { key: 'c' }];
+    const found = new Map([
+      ['a', 1_000],
+      ['b', 100_000],
+    ]);
+    return (
+      dueTargets(ts, found, 130_000)
+        .map(t => t.key)
+        .join() === 'a,c'
+    );
+  })(),
+  'dueTargets: a line scanned less than 2 min ago waits',
+);
+
 const targetKey = (t: ScanTarget) => `${t.arr ? 'a' : 'd'}|${t.routeId}|${t.head}`;
 
 const optionOf = (opts: LineOption[], l: AutoLine, arrivals: boolean) =>
@@ -145,6 +170,7 @@ type Loop = {
   depsRef: RefObject<Departure[]>;
   setRows: Dispatch<SetStateAction<AutoRows>>;
   setProgress: (p: AutoProgress | null) => void;
+  checkedAt: RefObject<Map<string, number>>; // target key -> when it was last scanned
 };
 
 // Applies `f` to this stop's rows (a state from another stop starts empty).
@@ -186,6 +212,7 @@ async function scanTarget(
   const done = await runScan(tg.t, c.stopId, true, alive, emit);
   if (!alive()) return false;
   const rows = done.rows ?? [];
+  c.checkedAt.current.set(tg.key, Date.now());
   c.setRows(updateRows(c.stopId, b => ({ ...b, [tg.key]: rows })));
   return true;
 }
@@ -196,8 +223,9 @@ async function round(c: Loop, alive: () => boolean) {
   const targets = await resolveTargets(c.file, c.stopId, lines, c.arrivals);
   if (!alive()) return;
   pruneRows(c, targets);
-  for (const [i, tg] of targets.entries()) {
-    if (!(await scanTarget(c, tg, { i: i + 1, n: targets.length }, alive))) return;
+  const due = dueTargets(targets, c.checkedAt.current, Date.now());
+  for (const [i, tg] of due.entries()) {
+    if (!(await scanTarget(c, tg, { i: i + 1, n: due.length }, alive))) return;
   }
 }
 
@@ -243,20 +271,25 @@ export function useAutoEstimate(p: {
   const [got, setGot] = useState<AutoRows>(NO_ROWS);
   const [progress, setProgress] = useState<AutoProgress | null>(null);
   const visible = usePageVisible();
+  const checkedAt = useRef(new Map<string, number>());
   const on = p.active && p.ready && visible && file !== null;
 
   useEffect(() => {
     setGot(NO_ROWS);
     setProgress(null);
+    checkedAt.current = new Map();
   }, [stopId]);
 
   useEffect(() => {
     if (!on || !file) return;
-    let live = true;
-    const alive = () => live;
-    void rounds({ stopId, file, arrivals, depsRef, setRows: setGot, setProgress }, alive);
+    const run = { live: true }; // cleared by the cleanup: late answers are dropped
+    const alive = () => run.live;
+    void rounds(
+      { stopId, file, arrivals, depsRef, setRows: setGot, setProgress, checkedAt },
+      alive,
+    );
     return () => {
-      live = false;
+      run.live = false;
       setProgress(null);
     };
   }, [on, file, stopId, arrivals, depsRef]);

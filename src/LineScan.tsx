@@ -32,9 +32,9 @@ import {
 
 // The line scan (pivot "escáner"): walk back along a line from the selected stop to the nearest
 // earlier stop with a live bus and project its time onto the selected stop. Started only from
-// the tab (at a terminus also for arrivals: trips that end at the stop); at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS.
+// the tab (at a terminus also for arrivals: trips that end at the stop); at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS (2 min).
 const BATCH = 3;
-const FOLLOW_MS = 30_000;
+const FOLLOW_MS = 120_000; // after a hit: the estimate stands, the next check in 2 min
 
 export type ScanTarget = {
   stopId: string;
