@@ -8,6 +8,8 @@ import {
   loadStopTowns,
 } from './data.ts';
 import {
+  arrivalMatches,
+  arrivalOptions,
   hhmm,
   isBus,
   lineOptions,
@@ -30,11 +32,17 @@ import {
 
 // The line scan (pivot "escáner"): walk back along a line from the selected stop to the nearest
 // earlier stop with a live bus and project its time onto the selected stop. Started only from
-// the tab; at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS.
+// the tab (at a terminus also for arrivals: trips that end at the stop); at most BATCH CRTM requests in flight; after a hit it repeats every FOLLOW_MS.
 const BATCH = 3;
 const FOLLOW_MS = 30_000;
 
-export type ScanTarget = { stopId: string; routeId: string; head: string; pi: number };
+export type ScanTarget = {
+  stopId: string;
+  routeId: string;
+  head: string;
+  pi: number;
+  arr?: true; // an arrivals scan: trips that END at stopId
+};
 export type StopScan =
   | { k: 'idle' | 'checking' | 'none' | 'error' }
   | { k: 'live'; when: Date };
@@ -77,6 +85,13 @@ type Probe = { id: string; scan: StopScan; rows: CrtmRow[] };
 const singleHead = (file: StopFile, routeId: string) =>
   isBus(file) && stopDirections(file, routeId).length === 1;
 
+// The live rows of the target at an upstream stop: departures of the line + direction, or
+// (arrivals scan) the line's rows whose trip ends at the selected stop.
+const hitsOf = (rows: CrtmRow[], t: ScanTarget, file: StopFile) =>
+  t.arr
+    ? arrivalMatches(rows, t.routeId, t.stopId)
+    : liveMatches(rows, t.routeId, t.head, singleHead(file, t.routeId));
+
 // One upstream stop: its live rows of the target line + direction, or why there are none.
 async function probeStop(id: string, t: ScanTarget): Promise<Probe> {
   try {
@@ -84,7 +99,7 @@ async function probeStop(id: string, t: ScanTarget): Promise<Probe> {
     if (feed.offlineSince) throw new Error('offline copy');
     const parsed = parseCrtm(feed.data, new Date());
     const rows = await directCrtm(parsed, file, id);
-    const hits = liveMatches(rows, t.routeId, t.head, singleHead(file, t.routeId));
+    const hits = hitsOf(rows, t, file);
     const scan: StopScan = hits.length ? { k: 'live', when: hits[0].when } : { k: 'none' };
     return { id, scan, rows: hits };
   } catch {
@@ -421,7 +436,26 @@ console.assert(
   'scanInfo',
 );
 
-const optionKey = (o: LineOption) => `${o.routeId}|${o.head}`;
+const optionKey = (o: Pick<LineOption, 'routeId' | 'head' | 'arr'>) =>
+  `${o.arr ? 'a' : 'd'}|${o.routeId}|${o.head}`;
+
+// The arrivals options of a terminus: per route the longest pattern ending at the stop.
+export async function loadArrivalOptions(file: BusFile, stopId: string): Promise<LineOption[]> {
+  const [pats, towns, names] = await Promise.all([
+    Promise.all(
+      file.r.map(r =>
+        loadRoute(r).then(
+          x => [r, x.p] as const,
+          () => [r, []] as const,
+        ),
+      ),
+    ),
+    loadStopTowns().catch(() => new Map<string, string>()),
+    loadStopNames().catch(() => new Map<string, string>()),
+  ]);
+  const townOf = (id: string) => towns.get(id) || names.get(id) || id;
+  return arrivalOptions(stopId, file.r, Object.fromEntries(pats), townOf);
+}
 const tileStyle = (r: RouteInfo) =>
   ({ '--tile': r.color, '--tile-text': r.text }) as React.CSSProperties;
 
@@ -468,6 +502,13 @@ const OWN_TEXT: Record<OwnLive, string> = {
   error: 'no se pudo comprobar esta parada',
 };
 
+// The selected stop's own live rows for the picked option (arrivals: the line's live rows).
+async function ownHits(parsed: CrtmRow[], file: BusFile, stopId: string, o: LineOption) {
+  if (o.arr) return parsed.filter(r => r.routeId === o.routeId && !r.scheduled);
+  const rows = await directCrtm(parsed, file, stopId);
+  return liveMatches(rows, o.routeId, o.head, singleHead(file, o.routeId));
+}
+
 // Does the selected stop itself have live times for the picked line? `fetchCrtm` is memoised
 // (the salidas pane asks the same), so this costs no extra request.
 function useOwnLive(
@@ -482,10 +523,9 @@ function useOwnLive(
     if (!file || !o) return;
     let current = true;
     const set = (v: OwnLive) => current && setRes({ key, v });
-    fetchCrtm(stopId)
+    fetchCrtm(stopId, !!o.arr)
       .then(async feed => {
-        const rows = await directCrtm(parseCrtm(feed.data, new Date()), file, stopId);
-        const hits = liveMatches(rows, o.routeId, o.head, singleHead(file, o.routeId));
+        const hits = await ownHits(parseCrtm(feed.data, new Date()), file, stopId, o);
         set(hits.length ? 'yes' : 'no');
       })
       .catch(() => set('error'));
@@ -719,6 +759,65 @@ function ScanPanel({ state, nameOf }: { state: ScanState; nameOf: (id: string) =
   );
 }
 
+// The option list of the tab: departures (`lineOptions`) or, at a terminus switched to
+// llegadas, the arrivals options (loaded per stop). A running scan fixes the mode.
+function useScanOptions(stopId: string, file: BusFile | null, state: ScanState) {
+  const [arr, setArr] = useState(false);
+  const [loaded, setLoaded] = useState<{ stopId: string; list: LineOption[] } | null>(null);
+  useEffect(() => setArr(false), [stopId]);
+  const terminus = !!file?.t;
+  useEffect(() => {
+    if (!file || !terminus) return;
+    let current = true;
+    loadArrivalOptions(file, stopId).then(
+      list => current && setLoaded({ stopId, list }),
+      () => current && setLoaded({ stopId, list: [] }),
+    );
+    return () => {
+      current = false;
+    };
+  }, [file, terminus, stopId]);
+  const arrivals = terminus && (state.target ? !!state.target.arr : arr);
+  const departures = useMemo(() => (file ? lineOptions(file) : []), [file]);
+  const arrivalList = loaded?.stopId === stopId ? loaded.list : [];
+  return {
+    options: arrivals ? arrivalList : departures,
+    terminus,
+    arrivals,
+    setArrivals: setArr,
+  };
+}
+
+const SCAN_MODES = [
+  { arrivals: false, label: 'salidas' },
+  { arrivals: true, label: 'llegadas' },
+];
+
+// salidas / llegadas of the scan at a bus terminus (same look as the board's switch).
+function ModeSwitch(p: {
+  show: boolean;
+  arrivals: boolean;
+  locked: boolean;
+  onMode: (arrivals: boolean) => void;
+}) {
+  if (!p.show) return null;
+  return (
+    <div className="board-mode" role="group" aria-label="Escanear salidas o llegadas">
+      {SCAN_MODES.map(m => (
+        <button
+          key={m.label}
+          className="btn tilt"
+          aria-pressed={p.arrivals === m.arrivals}
+          disabled={p.locked}
+          onClick={() => p.onMode(m.arrivals)}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Pivot "escáner": scans the selected stop's line from the tab (see the header comment).
 export default function LineTab(p: {
   stop: Saved;
@@ -731,10 +830,10 @@ export default function LineTab(p: {
   const { state } = scan;
   const note = scopeNote(stop.id, file, p.fileError);
   const busFile = note === '' && isBus(file) ? file : null;
-  const options = useMemo(() => (busFile ? lineOptions(busFile) : []), [busFile]);
+  const { options, terminus, arrivals, setArrivals } = useScanOptions(stop.id, busFile, state);
   const [pickedKey, setPickedKey] = useState('');
   useEffect(() => setPickedKey(''), [stop.id]);
-  const wanted = state.target ? `${state.target.routeId}|${state.target.head}` : pickedKey;
+  const wanted = state.target ? optionKey(state.target) : pickedKey;
   const picked = options.find(o => optionKey(o) === wanted) ?? options[0];
   const own = useOwnLive(stop.id, busFile, picked, state.finishedAt ?? 0);
   const { pattern, data } = usePatternData(picked?.routeId, picked?.pi);
@@ -746,6 +845,15 @@ export default function LineTab(p: {
       {note && <p className="status">{note}</p>}
       {busFile && (
         <>
+          <ModeSwitch
+            show={terminus}
+            arrivals={arrivals}
+            locked={!!state.target}
+            onMode={a => {
+              setArrivals(a);
+              setPickedKey('');
+            }}
+          />
           <LinePicker
             options={options}
             routes={p.routes}

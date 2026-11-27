@@ -853,6 +853,7 @@ export type CrtmRow = {
   scheduled?: boolean; // a bus time on the whole minute: CRTM's timetable, not an estimate
   estimated?: true; // projected from a live bus at an earlier stop of the line (line scan)
   from?: string; // estimated rows: the stop id the live bus was seen at
+  arr?: true; // estimated rows: an arrivals estimate (llegadas board), not a departure one
 };
 
 const many = <T>(v: One<T> | undefined): T[] => {
@@ -2276,7 +2277,7 @@ const stopsAfter = (p: Pattern, stopId: string) => {
 
 // Line scan: a bus stop with no live CRTM times borrows the nearest earlier stop of the line
 // that has a live bus and projects that bus's time forward with the pattern's offsets.
-export type LineOption = { routeId: string; head: string; pi: number };
+export type LineOption = { routeId: string; head: string; pi: number; arr?: true };
 export type ScanStop = { id: string; off: number };
 
 const topCount = (counts: Map<number, number>) =>
@@ -2334,6 +2335,75 @@ export function scanOrder(p: Pattern, stopId: string, max = Infinity): ScanStop[
     .map(([id, off]) => ({ id, off }));
 }
 
+// Arrivals scan options of a terminus: per route of the stop file, its longest pattern that
+// ends at `stopId`, labelled "desde <town of its first stop>" (`townOf` falls back to a name).
+export function arrivalOptions(
+  stopId: string,
+  routes: string[],
+  patternsByRoute: Record<string, Pattern[] | undefined>,
+  townOf: (id: string) => string,
+): LineOption[] {
+  const out: LineOption[] = [];
+  for (const routeId of routes) {
+    const pats = patternsByRoute[routeId] ?? [];
+    let best = -1;
+    pats.forEach((p, i) => {
+      const ends = p.length > 1 && p[p.length - 1][0] === stopId;
+      if (ends && (best < 0 || p.length > pats[best].length)) best = i;
+    });
+    if (best >= 0)
+      out.push({
+        routeId,
+        head: `desde ${townOf(pats[best][0][0])}`,
+        pi: best,
+        arr: true,
+      });
+  }
+  return out.sort((a, b) => a.routeId.localeCompare(b.routeId, 'es', { numeric: true }));
+}
+console.assert(
+  (() => {
+    const pats = {
+      A: [
+        [
+          ['x', 0],
+          ['t', 60],
+        ],
+        [
+          ['y', 0],
+          ['x', 60],
+          ['t', 120],
+        ],
+        [
+          ['t', 0],
+          ['x', 60],
+        ],
+      ] as Pattern[],
+      B: [[['x', 0]]] as Pattern[],
+    };
+    const o = arrivalOptions('t', ['B', 'A', 'C'], pats, id => id.toUpperCase());
+    return (
+      o.length === 1 &&
+      o[0].routeId === 'A' &&
+      o[0].pi === 1 &&
+      o[0].head === 'desde Y' &&
+      o[0].arr === true
+    );
+  })(),
+  'arrivalOptions: longest pattern ending at the stop, one option per route',
+);
+
+// Arrival rows at an upstream stop: the route's live rows whose trip ends at `stopId` (CRTM's
+// destination stop code is the stop id without "par_"); no headsign comparison.
+export const arrivalMatches = (rows: CrtmRow[], routeId: string, stopId: string) =>
+  rows.filter(
+    r =>
+      r.routeId === routeId &&
+      !r.scheduled &&
+      !r.estimated &&
+      r.code === stopId.replace(/^par_/, ''),
+  );
+
 // Live rows of the line + direction at an upstream stop. Whole-minute bus rows are CRTM's
 // timetable. `single`: the stop has just one direction of the route, so CRTM's own destination
 // text (not the headsign) is what the rows carry.
@@ -2349,7 +2419,7 @@ export function projectRows(
   p: Pattern,
   from: string,
   here: string,
-  target: { head: string; pi: number },
+  target: { head: string; pi: number; arr?: true },
 ): CrtmRow[] {
   const iu = stopIndex(p, from);
   const ih = stopIndex(p, here);
@@ -2358,11 +2428,13 @@ export function projectRows(
   return rows.map(r => ({
     ...r,
     when: new Date(r.when.getTime() + shift),
-    dest: target.head,
+    // Arrivals: `dest` is the origin (CRTM's own arrival rows group the same way).
+    dest: target.arr ? arrivalOrigin(r.route ?? r.dest) : target.head,
     pi: target.pi,
     scheduled: false,
     estimated: true,
     from,
+    ...(target.arr ? { arr: true as const } : {}),
   }));
 }
 
@@ -2431,7 +2503,19 @@ console.assert(
     );
     const proj = projectRows(hits, pat, 'b', 'd', { head: 'X', pi: 3 });
     const now = new Date('2026-11-26T15:00:00Z');
+    const endRow = { ...row('A', 'MADRID'), route: 'HOYO-MADRID', code: '8_77' };
+    const arrHits = arrivalMatches(
+      [endRow, row('A', 'X'), { ...endRow, scheduled: true }],
+      'A',
+      'par_8_77',
+    );
+    const arrProj = projectRows(arrHits, pat, 'b', 'd', { head: 'desde Q', pi: 3, arr: true });
     return (
+      arrHits.length === 1 &&
+      arrProj[0].dest === 'HOYO' &&
+      arrProj[0].arr === true &&
+      arrProj[0].estimated === true &&
+      proj[0].arr === undefined &&
       opts.length === 2 &&
       opts[0].routeId === 'A' &&
       opts[0].pi === 3 &&

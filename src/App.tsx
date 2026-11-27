@@ -13,7 +13,13 @@ import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
 import { usePivot, type PivotDrag } from './pivot.ts';
 import AlertsTab from './AlertsTab.tsx';
-import LineTab, { estimateText, useLineScan, useTick, type ScanState } from './LineScan.tsx';
+import LineTab, {
+  estimateText,
+  loadArrivalOptions,
+  useLineScan,
+  useTick,
+  type ScanState,
+} from './LineScan.tsx';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
 import { useLdEnabled } from './ld.ts';
@@ -43,6 +49,7 @@ import {
   type Timetable,
 } from './data.ts';
 import {
+  type BusFile,
   applyRealtime,
   dedupeLd,
   renfeArrivals,
@@ -515,7 +522,7 @@ const modeLabel = (d: Departure) => {
 // that line + direction from salidas itself (provided by App; null where not possible). `key`
 // is the line group that started the current scan.
 type Estimator = {
-  start: (d: Departure, key: string) => void;
+  start: (d: Departure, key: string, arrivals: boolean) => void;
   key: string | null;
   state: ScanState;
 };
@@ -533,16 +540,16 @@ function useEstimate(lineKey: string, collapse: () => void) {
     waiting.current = false;
     collapse();
   }, [found, collapse]);
-  const start = (d: Departure) => {
+  const start = (d: Departure, arrivals: boolean) => {
     waiting.current = true;
-    est?.start(d, lineKey);
+    est?.start(d, lineKey, arrivals);
   };
   return { est, mine, start };
 }
 
 function EstimateButton(p: {
   list: Departure[];
-  from: boolean;
+  from: boolean; // arrivals board: the scan is an arrivals scan
   est: ReturnType<typeof useEstimate>;
 }) {
   const head = p.list[0];
@@ -550,12 +557,12 @@ function EstimateButton(p: {
   const running = mine && !!est?.state.running;
   const now = useTick(running);
   const covered = p.list.some(d => d.live || d.estimated);
-  if (!est || p.from || !head.bus || (covered && !mine)) return null;
+  if (!est || !head.bus || (covered && !mine)) return null;
   const line = mine ? estimateText(est.state, now) : '';
   return (
     <div className="estimate">
       <div className="board-mode">
-        <button className="btn tilt" disabled={running} onClick={() => start(head)}>
+        <button className="btn tilt" disabled={running} onClick={() => start(head, p.from)}>
           {running ? 'estimando…' : 'estima tiempo'}
         </button>
       </div>
@@ -831,15 +838,17 @@ type Sources = {
 // The arrivals board: Renfe from the timetable plus GTFS-RT, bus and tram termini from CRTM
 // arrival rows only (the timetable has no arrivals for them).
 function arrivalsAt(tt: Timetable, src: Sources, list: StopFile, at: Date): Departure[] {
-  if (isBus(list)) return mergeCrtm([], src.crtm, tt.routes, at);
+  if (isBus(list)) return mergeCrtm([], withEstimates(src, list, at), tt.routes, at);
   const arr = renfeArrivals(list, tt.days, tt.routes, at, src.ld, src.arrivals ?? '');
   return dedupeLd(applyRealtime(arr, src.trips), true);
 }
 
-// Own CRTM rows plus the scan's projected rows for the lines the stop has no live row for.
+// Own CRTM rows plus the scan's projected rows for the lines the stop has no live row for
+// (`projected` already holds only this board's kind: departure or arrival estimates). On the
+// arrivals board a route is compared with its origin (`dest`), never as a single direction.
 function withEstimates(src: Sources, list: StopFile, at: Date): CrtmRow[] | null {
   if (!src.crtm || !src.projected.length || !isBus(list)) return src.crtm;
-  const single = (id: string) => stopDirections(list, id).length === 1;
+  const single = (id: string) => src.arrivals === null && stopDirections(list, id).length === 1;
   return [...src.crtm, ...estimateRows(src.projected, src.crtm, at, single)];
 }
 
@@ -1141,6 +1150,11 @@ function Departures({
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const [sort, setSort] = useSortMode();
+  // The scan's estimates of this board only: arrival ones on llegadas, departure ones on salidas.
+  const boardEstimates = useMemo(
+    () => projected.filter(r => !!r.arr === busArrivals),
+    [projected, busArrivals],
+  );
   const { deps, now } = useDepartureList(tt, {
     list: stopDeps,
     trips: renfe.trips,
@@ -1149,7 +1163,7 @@ function Departures({
     metro: isMetro,
     ld,
     arrivals: arrivalsAt,
-    projected,
+    projected: boardEstimates,
   });
   const statusText = rt.statusText(deps.some(d => d.live));
   const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
@@ -1455,6 +1469,14 @@ function usePrefetchLive(stops: Saved[]) {
   }, [key]);
 }
 
+// The scan option for a group's "estima tiempo": departures by route + headsign, arrivals the
+// route's own arrival option (no headsign: its destination is the origin).
+async function pickOption(file: BusFile, stopId: string, d: Departure, arrivals: boolean) {
+  if (!arrivals) return optionFor(lineOptions(file), d.routeId, d.dest);
+  const opts = await loadArrivalOptions(file, stopId);
+  return opts.find(o => o.routeId === d.routeId) ?? null;
+}
+
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
   const { nav, select, jump, toast } = useStopNav(stops[0]);
@@ -1478,11 +1500,11 @@ export default function App() {
   const [estKey, setEstKey] = useState<string | null>(null);
   const estimate: Estimator | null = isBus(stopFile)
     ? {
-        start: (d, key) => {
-          const o = optionFor(lineOptions(stopFile), d.routeId, d.dest);
-          if (!o) return;
+        start: (d, key, arrivals) => {
           setEstKey(key);
-          scan.start({ stopId, ...o });
+          void pickOption(stopFile, stopId, d, arrivals).then(
+            o => o && scan.start({ stopId, ...o }),
+          );
         },
         key: estKey,
         state: scan.state,
