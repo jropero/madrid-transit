@@ -966,6 +966,15 @@ p.next {
   margin: 0 0 8px;
 }
 
+/* "estima tiempo" in an open line group: clear of the departure rows above it */
+.estimate {
+  margin-top: 12px;
+}
+
+.estimate .status:empty {
+  display: none;
+}
+
 .board-mode .btn[aria-pressed='true'] {
   background: var(--accent);
   border-color: var(--accent);
