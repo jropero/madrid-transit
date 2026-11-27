@@ -20,6 +20,7 @@ import LineTab, {
   useTick,
   type ScanState,
 } from './LineScan.tsx';
+import { useAutoEstimate } from './autoEstimate.ts';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
 import { useLdEnabled } from './ld.ts';
@@ -57,7 +58,6 @@ import {
   compareLines,
   daysUntil,
   emtDepartures,
-  estimateRows,
   emtFromCrtm,
   fmtDist,
   ddmm,
@@ -70,7 +70,12 @@ import {
   loadSaved,
   prefetchTargets,
   parseSort,
-  timeOrdered,
+  timeRows,
+  parseTimeFilter,
+  dropShadowed,
+  pairEstimates,
+  mergeProjected,
+  type TimeFilter,
   type SortMode,
   locate,
   madridDate,
@@ -489,6 +494,7 @@ function DepartureRow({ d, now }: { d: Departure; now: number }) {
         <span className="time">{hhmm(d.planned)}</span>
         {d.unconfirmed && <span className="tag unconfirmed">no confirmado</span>}
         {d.estimated && <span className="tag estimated">estimado</span>}
+        {d.alsoEst && <span className="tag estimated">est. {hhmm(d.alsoEst)}</span>}
       </span>
       {d.live && <span className="sr-only"> en vivo</span>}
       {delay > 0 && !d.cancelled && <span className="late">+{delay}'</span>}
@@ -573,6 +579,57 @@ function EstimateButton(p: {
   );
 }
 
+// What a group's button shows. Por línea: a 72 px tile, the destination and up to four
+// departures. Compact (por hora): a small tile with the line number, the destination (one line)
+// and the one departure, all on a single row.
+function GroupFace(p: {
+  list: Departure[];
+  compact: boolean;
+  name: string;
+  from: boolean;
+  hasAlert: boolean;
+  now: number;
+}) {
+  const { list, compact, from, now } = p;
+  const head = list[0];
+  const tile = { '--tile': head.color, '--tile-text': head.text } as React.CSSProperties;
+  const name = (
+    <>
+      {from && 'desde '}
+      {short(p.name)}
+      <AlertMark on={p.hasAlert} />
+    </>
+  );
+  if (compact) {
+    return (
+      <>
+        <span className={`tile row${tileSize(head.line)}`} style={tile}>
+          <b>{head.line}</b>
+        </span>
+        <span className="dest">{name}</span>
+        <DepartureRow d={head} now={now} />
+      </>
+    );
+  }
+  return (
+    <>
+      <span className={`tile${tileSize(head.line)}`} style={tile}>
+        <b>{head.line}</b>
+        <small>{modeLabel(head)}</small>
+      </span>
+      <span className="deps">
+        <span className="dest">
+          {name}
+          {list.some(d => d.live) && <span className="live">en vivo</span>}
+        </span>
+        {list.slice(0, MAX_PER_GROUP).map(d => (
+          <DepartureRow key={d.tripId} d={d} now={now} />
+        ))}
+      </span>
+    </>
+  );
+}
+
 // A line and its next departures; tapping it lists the remaining stops of the next one.
 function LineGroup({
   list,
@@ -583,9 +640,11 @@ function LineGroup({
   stopId,
   hasAlert,
   now,
+  compact = false,
   onSelect,
 }: {
   list: Departure[];
+  compact?: boolean; // por hora: one single-departure row
   lineKey: string;
   defaultOpen: boolean;
   destName: string;
@@ -602,31 +661,23 @@ function LineGroup({
   const head = list[0];
   const followed = list.find(d => d.tripId === picked) ?? head;
   const train = !head.bus && !head.emt && !head.metro;
-  const tile = { '--tile': head.color, '--tile-text': head.text } as React.CSSProperties;
   const panel = `next-${head.routeId}-${head.tripId}`;
   return (
-    <section className="line">
+    <section className={compact ? 'line compact' : 'line'}>
       <button
-        className="group tilt"
+        className={compact ? 'group compact tilt' : 'group tilt'}
         aria-expanded={open}
         aria-controls={open ? panel : undefined}
         onClick={() => setOpen(!open)}
       >
-        <span className={`tile${tileSize(head.line)}`} style={tile}>
-          <b>{head.line}</b>
-          <small>{modeLabel(head)}</small>
-        </span>
-        <span className="deps">
-          <span className="dest">
-            {from && 'desde '}
-            {short(destName)}
-            <AlertMark on={hasAlert} />
-            {list.some(d => d.live) && <span className="live">en vivo</span>}
-          </span>
-          {list.slice(0, MAX_PER_GROUP).map(d => (
-            <DepartureRow key={d.tripId} d={d} now={now} />
-          ))}
-        </span>
+        <GroupFace
+          list={list}
+          compact={compact}
+          name={destName}
+          from={from}
+          hasAlert={hasAlert}
+          now={now}
+        />
       </button>
       {open && (
         <>
@@ -838,18 +889,25 @@ type Sources = {
 // The arrivals board: Renfe from the timetable plus GTFS-RT, bus and tram termini from CRTM
 // arrival rows only (the timetable has no arrivals for them).
 function arrivalsAt(tt: Timetable, src: Sources, list: StopFile, at: Date): Departure[] {
-  if (isBus(list)) return mergeCrtm([], withEstimates(src, list, at), tt.routes, at);
+  if (isBus(list)) return busBoard([], src, list, tt.routes, at);
   const arr = renfeArrivals(list, tt.days, tt.routes, at, src.ld, src.arrivals ?? '');
   return dedupeLd(applyRealtime(arr, src.trips), true);
 }
 
-// Own CRTM rows plus the scan's projected rows for the lines the stop has no live row for
-// (`projected` already holds only this board's kind: departure or arrival estimates). On the
+// Bus and light-rail board: the timetable merged with CRTM's rows and the scan's projected rows
+// (`projected` already holds only this board's kind: departure or arrival estimates), then each
+// estimate paired with the stop's own live row of its line (see `pairEstimates`). On the
 // arrivals board a route is compared with its origin (`dest`), never as a single direction.
-function withEstimates(src: Sources, list: StopFile, at: Date): CrtmRow[] | null {
-  if (!src.crtm || !src.projected.length || !isBus(list)) return src.crtm;
+function busBoard(
+  planned: Departure[],
+  src: Sources,
+  list: BusFile,
+  routes: RouteMap,
+  at: Date,
+): Departure[] {
   const single = (id: string) => src.arrivals === null && stopDirections(list, id).length === 1;
-  return [...src.crtm, ...estimateRows(src.projected, src.crtm, at, single)];
+  const rows = src.crtm && [...src.crtm, ...src.projected];
+  return dropShadowed(pairEstimates(mergeCrtm(planned, rows, routes, at), single));
 }
 
 function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
@@ -861,7 +919,7 @@ function departuresAt(tt: Timetable, src: Sources, at: Date): Departure[] {
   const planned = scheduled(src.list, tt.days, tt.routes, at, src.ld);
   // Buses and trams: CRTM times where it has them, else the timetable. Renfe: GTFS-RT.
   return isBus(src.list)
-    ? mergeCrtm(planned, withEstimates(src, src.list, at), tt.routes, at)
+    ? busBoard(planned, src, src.list, tt.routes, at)
     : dedupeLd(applyRealtime(planned, src.trips));
 }
 
@@ -970,11 +1028,11 @@ function BoardGroups(p: {
   ));
 }
 
-// "Por hora": one row per departure in expected-time order. Each row is a LineGroup with a
-// single departure, so the tile, tap-to-expand stops and train following keep working; the
-// key is unique per trip and call (a row never takes over another's open state).
+// "Por hora": one compact row per departure (already windowed, filtered and ordered). Each row
+// is a LineGroup with a single departure, so tap-to-expand stops and train following keep
+// working; the key is unique per trip and call (a row never takes over another's open state).
 function TimeRows(p: {
-  deps: Departure[];
+  rows: Departure[];
   arrivals: boolean;
   stopId: string;
   destName: (id: string) => string;
@@ -982,7 +1040,7 @@ function TimeRows(p: {
   now: number;
   onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
 }) {
-  return timeOrdered(p.deps).map(d => {
+  return p.rows.map(d => {
     const key = `time:${d.routeId}|${d.tripId}|${d.planned.getTime()}`;
     return (
       <LineGroup
@@ -990,6 +1048,7 @@ function TimeRows(p: {
         list={[d]}
         lineKey={key}
         defaultOpen={false}
+        compact
         stopId={p.stopId}
         destName={endName(d, p.arrivals, p.destName)}
         from={p.arrivals}
@@ -999,6 +1058,79 @@ function TimeRows(p: {
       />
     );
   });
+}
+
+const TIME_FILTER_KEY = 'madrid-transit:time-filter';
+const TIME_FILTERS: { id: TimeFilter; label: string }[] = [
+  { id: 'confirmed', label: 'confirmados' },
+  { id: 'all', label: 'todos' },
+];
+
+// The confirmados / todos choice of por hora, kept across stops and reloads.
+function useTimeFilter() {
+  const [filter, setFilter] = useState<TimeFilter>(() =>
+    parseTimeFilter(loadJson<unknown>(TIME_FILTER_KEY, null)),
+  );
+  const choose = (f: TimeFilter) => {
+    setFilter(f);
+    saveJson(TIME_FILTER_KEY, f);
+  };
+  return [filter, choose] as const;
+}
+
+// Confirmados (live or estimated) / todos, only in por hora.
+function TimeFilterSwitch(p: {
+  show: boolean;
+  filter: TimeFilter;
+  onFilter: (f: TimeFilter) => void;
+}) {
+  if (!p.show) return null;
+  return (
+    <div className="board-mode" role="group" aria-label="Filtro de la lista">
+      {TIME_FILTERS.map(f => (
+        <button
+          key={f.id}
+          className="btn tilt"
+          aria-pressed={p.filter === f.id}
+          onClick={() => p.onFilter(f.id)}
+        >
+          {f.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// "ninguna salida confirmada en los próximos 60 min" when por hora has no rows.
+const timeEmptyText = (arrivals: boolean, filter: TimeFilter) => {
+  const what = arrivals ? 'llegada' : 'salida';
+  return `ninguna ${what}${filter === 'confirmed' ? ' confirmada' : ''} en los próximos 60 min`;
+};
+console.assert(
+  timeEmptyText(false, 'confirmed') === 'ninguna salida confirmada en los próximos 60 min' &&
+    timeEmptyText(true, 'confirmed') === 'ninguna llegada confirmada en los próximos 60 min' &&
+    timeEmptyText(false, 'all') === 'ninguna salida en los próximos 60 min',
+  'timeEmptyText',
+);
+
+// The por hora board: the auto-estimate status line, the rows, or why there are none.
+function TimeBoard(
+  p: { rows: Departure[]; hasDeps: boolean; filter: TimeFilter; status: string } & Parameters<
+    typeof TimeRows
+  >[0],
+) {
+  const { hasDeps, filter, status, ...rest } = p;
+  return (
+    <>
+      <p className="status auto-status" role="status" aria-live="polite">
+        {status}
+      </p>
+      <TimeRows {...rest} />
+      {hasDeps && p.rows.length === 0 && (
+        <p className="status">{timeEmptyText(p.arrivals, filter)}</p>
+      )}
+    </>
+  );
 }
 
 // The salidas/llegadas choice, kept while browsing; the switch only exists on Renfe stations and
@@ -1100,6 +1232,37 @@ function SortSwitch(p: { show: boolean; sort: SortMode; onSort: (m: SortMode) =>
   );
 }
 
+// The estimates feeding this board: the escáner's, plus por hora's own automatic ones (bus and
+// light-rail stops, only while por hora is showing). Only this board's kind: arrival ones on
+// llegadas, departure ones on salidas. `status` is the automatic scan's progress line.
+function useBoardEstimates(p: {
+  stopId: string;
+  file: StopFile | null;
+  depsRef: React.RefObject<Departure[]>;
+  arrivals: boolean;
+  timeMode: boolean;
+  active: boolean;
+  ready: boolean;
+  projected: CrtmRow[];
+}) {
+  const { arrivals, timeMode, projected } = p;
+  const auto = useAutoEstimate({
+    stopId: p.stopId,
+    file: isBus(p.file) ? p.file : null,
+    depsRef: p.depsRef,
+    arrivals,
+    active: p.active && timeMode,
+    ready: p.ready,
+  });
+  const own = timeMode ? auto.rows : NONE;
+  const estimates = useMemo(
+    () => mergeProjected(projected, own).filter(r => !!r.arr === arrivals),
+    [projected, own, arrivals],
+  );
+  return { estimates, status: auto.status };
+}
+const NONE: CrtmRow[] = [];
+
 // Departures pane: owns search and the live refresh (30 s Renfe, 60 s CRTM; only while `active`).
 function Departures({
   stops,
@@ -1150,11 +1313,19 @@ function Departures({
   const emt = useEmt(selected.id, active && isEmt);
   const rt = pickFeed({ emt: isEmt, crtm: useCrtmFeed }, { renfe, crtm, emt });
   const [sort, setSort] = useSortMode();
-  // The scan's estimates of this board only: arrival ones on llegadas, departure ones on salidas.
-  const boardEstimates = useMemo(
-    () => projected.filter(r => !!r.arr === busArrivals),
-    [projected, busArrivals],
-  );
+  const [timeFilter, setTimeFilter] = useTimeFilter();
+  const timeMode = sort === 'time';
+  const depsRef = useRef<Departure[]>([]);
+  const auto = useBoardEstimates({
+    stopId: selected.id,
+    file: stopDeps,
+    depsRef,
+    arrivals: busArrivals,
+    timeMode,
+    active,
+    ready: crtm.rows !== null,
+    projected,
+  });
   const { deps, now } = useDepartureList(tt, {
     list: stopDeps,
     trips: renfe.trips,
@@ -1163,8 +1334,12 @@ function Departures({
     metro: isMetro,
     ld,
     arrivals: arrivalsAt,
-    projected: boardEstimates,
+    projected: auto.estimates,
   });
+  useEffect(() => {
+    depsRef.current = deps;
+  }, [deps]);
+  const timed = useMemo(() => timeRows(deps, now, timeFilter), [deps, now, timeFilter]);
   const statusText = rt.statusText(deps.some(d => d.live));
   const alerts = alertsOf(renfeStop, renfe.alerts, emt.alerts);
 
@@ -1297,11 +1472,19 @@ function Departures({
       <div className="board-controls">
         <BoardSwitch show={showSwitch} mode={mode} onMode={setMode} />
         <SortSwitch show={deps.length > 0} sort={sort} onSort={setSort} />
+        <TimeFilterSwitch
+          show={timeMode && deps.length > 0}
+          filter={timeFilter}
+          onFilter={setTimeFilter}
+        />
       </div>
 
-      {sort === 'time' ? (
-        <TimeRows
-          deps={deps}
+      {timeMode ? (
+        <TimeBoard
+          rows={timed}
+          hasDeps={deps.length > 0}
+          filter={timeFilter}
+          status={auto.status}
           arrivals={arrivals}
           stopId={selected.id}
           destName={destName}

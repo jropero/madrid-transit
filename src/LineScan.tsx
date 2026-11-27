@@ -128,7 +128,7 @@ async function runBatch(
 
 // One pass, nearest first in batches; the first batch with a live bus ends it, and the nearest
 // stop of that batch wins. `alive` turns false once cancelled: late answers are dropped.
-async function runScan(
+export async function runScan(
   t: ScanTarget,
   here: string,
   again: boolean,

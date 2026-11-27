@@ -966,6 +966,73 @@ p.next {
   margin: 0 0 8px;
 }
 
+/* Por hora: one compact row per departure. The tile is 1.5 body lines tall (a body line is
+   about 1.35 x --t-body), the destination takes the room left and ellipsizes, the time with its
+   tags and the minutes stay on the right. */
+.line.compact {
+  --row-h: calc(var(--t-body) * 2);
+
+  margin-bottom: 10px;
+}
+
+.group.compact {
+  align-items: center;
+  gap: 10px;
+}
+
+.tile.row {
+  flex: 0 0 var(--row-h);
+  height: var(--row-h);
+}
+
+.tile.row b {
+  inset: 0;
+  font-size: calc(var(--t-body) * 1.1);
+  font-weight: 400;
+}
+
+.tile.row.long b {
+  font-size: calc(var(--t-body) * 0.75);
+}
+
+.tile.row.xlong b {
+  font-size: calc(var(--t-body) * 0.55);
+  letter-spacing: 0;
+}
+
+.group.compact .dest {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--t-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group.compact .dep {
+  flex: none;
+}
+
+.group.compact .dep .left {
+  min-width: 3.6em;
+  font-size: var(--t-body);
+  text-align: right;
+}
+
+.line.compact .next {
+  margin-left: calc(var(--row-h) + 10px);
+}
+
+/* Status line of the automatic estimates (por hora), under the switches */
+.auto-status {
+  margin: 0 0 8px;
+}
+
+.auto-status:empty {
+  display: none;
+}
+
 /* "estima tiempo" in an open line group: clear of the departure rows above it */
 .estimate {
   margin-top: 12px;

@@ -97,6 +97,7 @@ export type Departure = {
   unconfirmed?: boolean;
   estimated?: boolean; // projected from a live bus at an earlier stop (line scan), not live here
   estFrom?: string; // estimated rows: the stop id the live bus was seen at
+  alsoEst?: Date; // live rows: the line scan's own estimate of this bus, when it differs by 2+ min
   distM?: number; // EMT only: distance of the bus to the stop, metres
   pi?: number; // timetable rows: index of the trip's stop pattern in its route file
   endStop?: string; // CRTM rows: the trip's last stop (`par_<code>`), to pick its pattern
@@ -658,6 +659,61 @@ console.assert(
     parseSort('x') === 'line' &&
     parseSort(null) === 'line',
   'timeOrdered sorts by expected time and caps; parseSort defaults to line',
+);
+
+// "Por hora" filter: only tracked rows (live or estimated), or everything.
+export type TimeFilter = 'confirmed' | 'all';
+export const parseTimeFilter = (v: unknown): TimeFilter => (v === 'all' ? 'all' : 'confirmed');
+
+export const TIME_WINDOW_MS = 60 * 60_000;
+export const inTimeWindow = (d: Departure, now: number) => {
+  const t = d.expected.getTime();
+  return t >= now - 60_000 && t <= now + TIME_WINDOW_MS;
+};
+
+// The "por hora" board: rows expected in [now - 1 min, now + 60 min], filtered, time-ordered, capped.
+export const timeRows = (
+  deps: Departure[],
+  now: number,
+  filter: TimeFilter,
+  max = TIME_ROWS_MAX,
+) =>
+  timeOrdered(
+    deps.filter(d => inTimeWindow(d, now) && (filter === 'all' || d.live || !!d.estimated)),
+    max,
+  );
+console.assert(
+  (() => {
+    const now = Date.UTC(2026, 10, 27, 20, 0);
+    const mk = (min: number, extra: Partial<Departure>) =>
+      ({
+        expected: new Date(now + min * 60_000),
+        planned: new Date(now + min * 60_000),
+        live: false,
+        ...extra,
+      }) as Departure;
+    const deps = [
+      mk(90, { live: true }),
+      mk(-5, { live: true }),
+      mk(30, {}),
+      mk(20, { estimated: true }),
+      mk(10, { live: true, cancelled: true }),
+      mk(60, {}),
+    ];
+    const all = timeRows(deps, now, 'all');
+    const conf = timeRows(deps, now, 'confirmed');
+    return (
+      all.length === 4 &&
+      conf.length === 2 &&
+      conf[0].live === true &&
+      conf[1].estimated === true &&
+      timeRows(deps, now, 'all', 1).length === 1 &&
+      parseTimeFilter('all') === 'all' &&
+      parseTimeFilter('x') === 'confirmed' &&
+      parseTimeFilter(null) === 'confirmed'
+    );
+  })(),
+  'timeRows: 60 min window, confirmed filter, cap; parseTimeFilter defaults to confirmed',
 );
 
 // Trip-level delay (seconds) and cancellation from GTFS-RT; the feed covers all of Spain.
@@ -2438,28 +2494,160 @@ export function projectRows(
   }));
 }
 
-// Projected rows worth showing: only for a route + headsign the stop's own CRTM rows have no
-// live row for inside [now - 1 min, now + 2 h] (the stop's own data always wins). `single`
-// tells whether the stop has one direction of the route (then only the route is compared).
-export function estimateRows(
-  projected: CrtmRow[],
-  own: CrtmRow[],
-  now: Date,
-  single: (routeId: string) => boolean,
-): CrtmRow[] {
-  const from = now.getTime() - 60_000;
-  const to = now.getTime() + HORIZON_MS;
-  const covered = (p: CrtmRow) =>
-    own.some(
-      o =>
-        !o.scheduled &&
-        o.routeId === p.routeId &&
-        (single(p.routeId) || o.dest === p.dest) &&
-        o.when.getTime() >= from &&
-        o.when.getTime() <= to,
+// Estimates of the manual scan and of the automatic one (por hora): one projection per route +
+// destination (+ board kind) within 60 s, the manual one first.
+export function mergeProjected(manual: CrtmRow[], auto: CrtmRow[]): CrtmRow[] {
+  const out = [...manual];
+  for (const a of auto) {
+    const dup = out.some(
+      m =>
+        m.routeId === a.routeId &&
+        m.dest === a.dest &&
+        !!m.arr === !!a.arr &&
+        Math.abs(m.when.getTime() - a.when.getTime()) <= 60_000,
     );
-  return projected.filter(p => !covered(p));
+    if (!dup) out.push(a);
+  }
+  return out;
 }
+
+// An estimate and a live row of one line (`single`: the stop has one direction of the route, so
+// only the route is compared).
+const sameLine = (a: Departure, b: Departure, single: (routeId: string) => boolean) =>
+  a.routeId === b.routeId && (single(a.routeId) || a.dest === b.dest);
+
+const PAIR_MAX_MS = 20 * 60_000;
+const ALSO_EST_MS = 2 * 60_000;
+type Pair = { est: Departure; live: Departure; gap: number };
+
+// Every estimate with the own live rows of its line within PAIR_MAX_MS, closest first.
+function pairCandidates(deps: Departure[], single: (routeId: string) => boolean): Pair[] {
+  const lives = deps.filter(d => d.live && !d.estimated);
+  return deps
+    .filter(d => d.estimated)
+    .flatMap(est =>
+      lives
+        .filter(live => sameLine(est, live, single))
+        .map(live => ({
+          est,
+          live,
+          gap: Math.abs(live.expected.getTime() - est.expected.getTime()),
+        })),
+    )
+    .filter(c => c.gap <= PAIR_MAX_MS)
+    .sort((a, b) => a.gap - b.gap);
+}
+
+// An estimate that stays on the board stands for the timetable time it projects (CRTM's own
+// whole-minute time or a timetable run of the same line and destination, nearest within 2 min):
+// that time is dropped, else 16578 showed "461 21:49 estimado" right above "461 21:50". Each
+// estimate takes at most one; live, estimated and "no confirmado" rows are never dropped.
+const SHADOW_MS = 2 * 60_000;
+const plainRow = (d: Departure) => !d.live && !d.estimated && !d.unconfirmed && !d.cancelled;
+function nearestPlain(deps: Departure[], est: Departure, gone: Set<Departure>) {
+  let best: Departure | null = null;
+  let gap = SHADOW_MS;
+  for (const d of deps) {
+    const g = Math.abs(d.expected.getTime() - est.expected.getTime());
+    const same = d.routeId === est.routeId && d.dest === est.dest;
+    if (same && plainRow(d) && !gone.has(d) && g <= gap) [best, gap] = [d, g];
+  }
+  return best;
+}
+export function dropShadowed(deps: Departure[]): Departure[] {
+  const gone = new Set<Departure>();
+  for (const est of deps.filter(d => d.estimated)) {
+    const d = nearestPlain(deps, est, gone);
+    if (d) gone.add(d);
+  }
+  return gone.size ? deps.filter(d => !gone.has(d)) : deps;
+}
+console.assert(
+  (() => {
+    const t0 = Date.UTC(2026, 10, 27, 20, 0);
+    const mk = (min: number, extra: Partial<Departure> = {}) =>
+      ({
+        routeId: 'r',
+        dest: 'X',
+        expected: new Date(t0 + min * 60_000),
+        live: false,
+        ...extra,
+      }) as Departure;
+    const est = mk(49.5, { estimated: true });
+    const out = dropShadowed([est, mk(50), mk(51), mk(60), mk(50, { dest: 'Y' })]);
+    const keep = dropShadowed([est, mk(48, { unconfirmed: true }), mk(53)]);
+    return (
+      out.length === 4 &&
+      out
+        .filter(d => d.dest === 'X' && !d.estimated)
+        .map(d => d.expected.getTime())
+        .join() === [t0 + 51 * 60_000, t0 + 60 * 60_000].join() &&
+      keep.length === 3
+    );
+  })(),
+  'dropShadowed: an estimate replaces the timetable time it stands for',
+);
+
+// An estimated departure and the stop's own live departure of the same line are one bus: the
+// estimate is dropped (each live row takes one, closest pairs first) and, when the two times
+// differ by 2+ min, the live row remembers it as `alsoEst`. An unpaired estimate stays.
+export function pairEstimates(
+  deps: Departure[],
+  single: (routeId: string) => boolean = () => false,
+): Departure[] {
+  const gone = new Set<Departure>();
+  const taken = new Map<Departure, Pair>();
+  for (const c of pairCandidates(deps, single)) {
+    if (gone.has(c.est) || taken.has(c.live)) continue;
+    gone.add(c.est);
+    taken.set(c.live, c);
+  }
+  return deps
+    .filter(d => !gone.has(d))
+    .map(d => {
+      const p = taken.get(d);
+      return p && p.gap >= ALSO_EST_MS ? { ...d, alsoEst: p.est.expected } : d;
+    });
+}
+console.assert(
+  (() => {
+    const t0 = Date.UTC(2026, 10, 27, 20, 0);
+    const mk = (min: number, extra: Partial<Departure>) =>
+      ({
+        routeId: 'r',
+        dest: 'X',
+        expected: new Date(t0 + min * 60_000),
+        planned: new Date(t0 + min * 60_000),
+        live: false,
+        ...extra,
+      }) as Departure;
+    const live = mk(10, { live: true });
+    const far = pairEstimates([live, mk(15, { estimated: true })]);
+    const near = pairEstimates([live, mk(11, { estimated: true })]);
+    const twoLive = pairEstimates([
+      live,
+      mk(30, { live: true }),
+      mk(12, { estimated: true }),
+      mk(29, { estimated: true }),
+    ]);
+    const lone = pairEstimates([mk(40, { estimated: true }), live]);
+    const other = pairEstimates([live, mk(15, { estimated: true, dest: 'Y' })]);
+    const single = pairEstimates([live, mk(15, { estimated: true, dest: 'Y' })], () => true);
+    return (
+      far.length === 1 &&
+      far[0].alsoEst?.getTime() === t0 + 15 * 60_000 &&
+      near.length === 1 &&
+      near[0].alsoEst === undefined &&
+      twoLive.length === 2 &&
+      twoLive[0].alsoEst?.getTime() === t0 + 12 * 60_000 &&
+      twoLive[1].alsoEst === undefined &&
+      lone.length === 2 &&
+      other.length === 2 &&
+      single.length === 1
+    );
+  })(),
+  'pairEstimates: nearest own live row of the line, alsoEst from 2 min, unpaired stays',
+);
 
 console.assert(
   (() => {
@@ -2502,7 +2690,6 @@ console.assert(
       false,
     );
     const proj = projectRows(hits, pat, 'b', 'd', { head: 'X', pi: 3 });
-    const now = new Date('2026-11-26T15:00:00Z');
     const endRow = { ...row('A', 'MADRID'), route: 'HOYO-MADRID', code: '8_77' };
     const arrHits = arrivalMatches(
       [endRow, row('A', 'X'), { ...endRow, scheduled: true }],
@@ -2533,14 +2720,18 @@ console.assert(
       proj[0].from === 'b' &&
       proj[0].pi === 3 &&
       projectRows(hits, pat, 'zz', 'd', { head: 'X', pi: 3 }).length === 0 &&
-      estimateRows(proj, [], now, () => false).length === 1 &&
-      estimateRows(proj, [row('A', 'X')], now, () => false).length === 0 &&
-      estimateRows(proj, [row('A', 'Q')], now, () => false).length === 1 &&
-      estimateRows(proj, [row('A', 'Q')], now, () => true).length === 0 &&
-      estimateRows(proj, [row('A', 'X', true)], now, () => false).length === 1
+      mergeProjected(proj, arrProj).length === 2 &&
+      mergeProjected(
+        proj,
+        proj.map(r => ({ ...r, when: new Date(r.when.getTime() + 30_000) })),
+      ).length === 1 &&
+      mergeProjected(
+        proj,
+        proj.map(r => ({ ...r, when: new Date(r.when.getTime() + 90_000) })),
+      ).length === 2
     );
   })(),
-  'line scan: lineOptions, scanOrder, liveMatches, projectRows, estimateRows',
+  'line scan: lineOptions, scanOrder, liveMatches, projectRows, mergeProjected',
 );
 
 // Accent-insensitive, either name may contain the other ("PINAR DE CHAMARTIN" vs "Pinar de Chamartín").
