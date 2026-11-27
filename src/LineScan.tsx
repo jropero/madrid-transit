@@ -48,6 +48,10 @@ export type ScanState = {
   failed: boolean; // the line's stop pattern could not be loaded
   total: number; // stops to check (every earlier stop of the pattern)
   upto: number; // stops checked or in flight in the current pass
+  inFlight: string[]; // stops whose CRTM answer the current batch is waiting for
+  batchAt: number | null; // when the current batch started
+  away: number; // the hit is this many stops before the selected one
+  nextAt: number | null; // when the next follow-up pass is due (after a hit)
 };
 
 const EMPTY: ScanState = {
@@ -60,6 +64,10 @@ const EMPTY: ScanState = {
   failed: false,
   total: 0,
   upto: 0,
+  inFlight: [],
+  batchAt: null,
+  away: 0,
+  nextAt: null,
 };
 
 type Probe = { id: string; scan: StopScan; rows: CrtmRow[] };
@@ -120,17 +128,18 @@ async function runScan(
   const scans: Record<string, StopScan> = {};
   for (let i = 0; i < order.length; i += BATCH) {
     const ids = order.slice(i, i + BATCH).map(s => s.id);
-    emit({ upto: i + ids.length });
+    emit({ upto: i + ids.length, inFlight: ids, batchAt: Date.now() });
     const probes = await runBatch(ids, t, scans, again, emit);
     if (!alive()) return {};
-    emit({ scans: { ...scans } });
+    emit({ scans: { ...scans }, inFlight: [] });
     const hit = probes.find(p => p.rows.length > 0);
     if (hit) {
       const rows = projectRows(hit.rows, pattern, hit.id, here, t);
-      return { scans, hit: hit.id, rows, total: order.length };
+      const away = order.findIndex(o => o.id === hit.id) + 1;
+      return { scans, hit: hit.id, rows, total: order.length, away };
     }
   }
-  return { scans, hit: null, rows: [], total: order.length };
+  return { scans, hit: null, rows: [], total: order.length, away: 0 };
 }
 
 // Scan state of the selected stop. Reset when the stop changes; `start` begins a scan,
@@ -161,7 +170,9 @@ export function useLineScan(stopId: string, onHit?: () => void) {
       const done = await runScan(t, stopId, again, alive, emit);
       if (!alive()) return;
       busy.current = false;
-      setState(s => ({ ...s, ...done, running: false, finishedAt: Date.now() }));
+      const at = Date.now();
+      const nextAt = done.hit ? at + FOLLOW_MS : null;
+      setState(s => ({ ...s, ...done, running: false, finishedAt: at, inFlight: [], nextAt }));
       if (!again && done.hit) hitRef.current?.();
     },
     [stopId],
@@ -182,56 +193,124 @@ export function useLineScan(stopId: string, onHit?: () => void) {
     setState(EMPTY);
   }, []);
 
-  // After a hit, repeat while the page is visible so the estimate follows the bus.
+  // A follow-up pass now (the "comprobar ahora" button and the follow timer).
   const target = state.target;
-  const following = state.hit !== null;
-  useEffect(() => {
-    if (!target || !following) return;
-    const id = setInterval(() => {
-      if (document.visibilityState !== 'visible' || busy.current) return;
-      setState(s => ({ ...s, running: true }));
-      void pass(target, true);
-    }, FOLLOW_MS);
-    return () => clearInterval(id);
-  }, [target, following, pass]);
+  const refresh = useCallback(() => {
+    if (!target || busy.current) return;
+    setState(s => ({ ...s, running: true, nextAt: null }));
+    void pass(target, true);
+  }, [target, pass]);
 
-  return { state, start, stop };
+  // After a hit, the next pass is due FOLLOW_MS after the last one ended; while the page is
+  // hidden it waits and runs as soon as the page is visible again.
+  const nextAt = state.nextAt;
+  useEffect(() => {
+    if (nextAt === null) return;
+    const due = () => document.visibilityState === 'visible' && refresh();
+    const id = window.setTimeout(due, Math.max(0, nextAt - Date.now()));
+    const onVisible = () => Date.now() >= nextAt && due();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearTimeout(id);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [nextAt, refresh]);
+
+  return { state, start, stop, refresh };
 }
 
 export type LineScanApi = ReturnType<typeof useLineScan>;
 
-// "bus en vivo en <parada>: llega aquí hacia las HH:MM (estimado)"; messages of the other states.
-export function scanStatus(s: ScanState, nameOf: (id: string) => string): string {
-  if (!s.target) return 'elige una línea y pulsa escanear';
-  if (s.failed) return 'no se pudo cargar el recorrido de la línea';
-  if (s.hit && s.rows.length) {
-    return `bus en vivo en ${nameOf(s.hit)}: llega aquí hacia las ${hhmm(s.rows[0].when)} (estimado)`;
-  }
-  return s.running ? `comprobando ${s.upto} de ${s.total} paradas…` : noHitText(s);
+// What the scan is doing, as up to three lines: `phase` (announced), `detail` and `next`
+// (countdowns: not announced). `bar` is the share of stops checked during a pass, else null.
+export type ScanInfo = { phase: string; detail: string; next: string; bar: number | null };
+const SLOW_MS = 3000;
+
+const secs = (ms: number) => `${Math.max(0, Math.round(ms / 1000))} s`;
+const stopsText = (n: number) => `${n} ${n === 1 ? 'parada' : 'paradas'}`;
+
+// The stops of the batch in flight, plus how long CRTM has kept us waiting once it is slow.
+function waitingText(s: ScanState, now: number, nameOf: (id: string) => string): string {
+  if (!s.inFlight.length) return '';
+  const names = `comprobando ${s.inFlight.map(nameOf).join(', ')}`;
+  const waited = s.batchAt === null ? 0 : now - s.batchAt;
+  return waited > SLOW_MS ? `${names} · esperando al CRTM ${secs(waited)}` : names;
 }
 
-const noHitText = (s: ScanState) => {
+const barOf = (s: ScanState) =>
+  s.running && s.total > 0 ? (s.upto - s.inFlight.length) / s.total : null;
+
+function hitInfo(s: ScanState, now: number, hidden: boolean, nameOf: (id: string) => string) {
+  const phase =
+    `bus en vivo en ${nameOf(s.hit ?? '')} (${stopsText(s.away)} antes): ` +
+    `llega aquí hacia las ${hhmm(s.rows[0].when)} (estimado)`;
+  if (s.running)
+    return { phase, detail: `actualizando… ${s.upto} de ${s.total} paradas`, next: '' };
+  const ago = s.finishedAt === null ? '' : `comprobado hace ${secs(now - s.finishedAt)}`;
+  const next = hidden
+    ? 'en pausa mientras la app está en segundo plano'
+    : `siguiente comprobación en ${secs((s.nextAt ?? now) - now)}`;
+  return { phase, detail: ago, next };
+}
+
+function idleInfo(s: ScanState): string {
   if (s.finishedAt === null) return 'comprobando…';
   if (s.total === 0) return 'esta es la primera parada de la línea: no hay paradas anteriores';
-  return `sin buses en vivo en las ${s.total} paradas anteriores`;
-};
+  return `sin buses en vivo en las ${stopsText(s.total)} anteriores`;
+}
+
+export function scanInfo(
+  s: ScanState,
+  now: number,
+  hidden: boolean,
+  nameOf: (id: string) => string,
+): ScanInfo {
+  const bar = barOf(s);
+  if (!s.target)
+    return { phase: 'elige una línea y pulsa escanear', detail: '', next: '', bar };
+  if (s.failed)
+    return { phase: 'no se pudo cargar el recorrido de la línea', detail: '', next: '', bar };
+  if (s.hit && s.rows.length) {
+    const info = hitInfo(s, now, hidden, nameOf);
+    return { ...info, detail: waitingText(s, now, nameOf) || info.detail, bar };
+  }
+  if (s.running) {
+    const phase = `buscando un bus en vivo · ${s.upto - s.inFlight.length} de ${s.total} paradas`;
+    return { phase, detail: waitingText(s, now, nameOf), next: '', bar };
+  }
+  const at = s.finishedAt === null ? '' : `comprobado a las ${hhmm(new Date(s.finishedAt))}`;
+  return { phase: idleInfo(s), detail: at, next: '', bar };
+}
 console.assert(
   (() => {
     const base = { ...EMPTY, target: { stopId: 'a', routeId: 'r', head: 'h', pi: 0 } };
     const row = { when: new Date('2026-11-26T14:34:00Z') } as CrtmRow;
     const nameOf = (id: string) => id.toUpperCase();
+    const run = { ...base, running: true, total: 7, upto: 6, inFlight: ['x', 'y', 'z'] };
+    const slow = scanInfo({ ...run, batchAt: 0 }, 12_000, false, nameOf);
+    const hit = { ...base, hit: 'b', rows: [row], away: 6, finishedAt: 0, nextAt: 30_000 };
+    const followed = scanInfo(hit, 12_000, false, nameOf);
     return (
-      scanStatus(EMPTY, nameOf) === 'elige una línea y pulsa escanear' &&
-      scanStatus({ ...base, running: true, total: 7, upto: 3 }, nameOf) ===
-        'comprobando 3 de 7 paradas…' &&
-      scanStatus({ ...base, hit: 'b', rows: [row], finishedAt: 1 }, nameOf) ===
-        'bus en vivo en B: llega aquí hacia las 15:34 (estimado)' &&
-      scanStatus({ ...base, total: 7, finishedAt: 1 }, nameOf) ===
+      scanInfo(EMPTY, 0, false, nameOf).phase === 'elige una línea y pulsa escanear' &&
+      slow.phase === 'buscando un bus en vivo · 3 de 7 paradas' &&
+      slow.detail === 'comprobando X, Y, Z · esperando al CRTM 12 s' &&
+      slow.bar === 3 / 7 &&
+      scanInfo({ ...run, batchAt: 0 }, 1000, false, nameOf).detail === 'comprobando X, Y, Z' &&
+      followed.phase ===
+        'bus en vivo en B (6 paradas antes): llega aquí hacia las 15:34 (estimado)' &&
+      followed.detail === 'comprobado hace 12 s' &&
+      followed.next === 'siguiente comprobación en 18 s' &&
+      followed.bar === null &&
+      scanInfo(hit, 12_000, true, nameOf).next.startsWith('en pausa') &&
+      scanInfo({ ...hit, away: 1 }, 0, false, nameOf).phase.includes('(1 parada antes)') &&
+      scanInfo({ ...base, total: 7, finishedAt: 1 }, 0, false, nameOf).phase ===
         'sin buses en vivo en las 7 paradas anteriores' &&
-      scanStatus({ ...base, total: 0, finishedAt: 1 }, nameOf).startsWith('esta es la primera')
+      scanInfo({ ...base, total: 0, finishedAt: 1 }, 0, false, nameOf).phase.startsWith(
+        'esta es la primera',
+      )
     );
   })(),
-  'scanStatus',
+  'scanInfo',
 );
 
 const optionKey = (o: LineOption) => `${o.routeId}|${o.head}`;
@@ -322,13 +401,14 @@ function StopRow(p: {
   id: string;
   here: boolean;
   after: boolean;
+  hit: boolean;
   scan: StopScan | undefined;
   est: Date | null;
   data: Names | null;
 }) {
   const name = p.data?.names.get(p.id) ?? p.id;
   const town = p.data?.towns.get(p.id);
-  const cls = `${p.here ? 'here' : ''}${p.after ? ' passed' : ''}`.trim();
+  const cls = [p.here && 'here', p.after && 'passed', p.hit && 'hit'].filter(Boolean).join(' ');
   return (
     <li className={cls || undefined} aria-current={p.here || undefined}>
       <span className="stop-name">
@@ -355,7 +435,8 @@ function PatternStops(p: { pattern: Pattern; stopId: string; state: ScanState; d
           id={id}
           here={i === hereAt}
           after={hereAt >= 0 && i > hereAt}
-          scan={p.state.scans[id]}
+          hit={id === p.state.hit}
+          scan={p.state.inFlight.includes(id) ? { k: 'checking' } : p.state.scans[id]}
           est={i === hereAt ? (p.state.rows[0]?.when ?? null) : null}
           data={p.data}
         />
@@ -409,9 +490,12 @@ function ScanControls(p: {
   const { state, picked, scan } = p;
   if (state.target)
     return (
-      <button className="btn tilt" onClick={scan.stop}>
-        detener
-      </button>
+      <>
+        <button className="btn tilt" onClick={scan.stop}>
+          detener
+        </button>
+        <AgainButton state={state} scan={scan} />
+      </>
     );
   return (
     <button
@@ -421,6 +505,75 @@ function ScanControls(p: {
     >
       escanear
     </button>
+  );
+}
+
+// After a hit: check now instead of waiting; after a pass without a bus: scan again.
+function AgainButton({ state, scan }: { state: ScanState; scan: LineScanApi }) {
+  const t = state.target;
+  if (!t || state.running || state.failed || state.finishedAt === null) return null;
+  if (state.hit)
+    return (
+      <button className="btn tilt" onClick={scan.refresh}>
+        comprobar ahora
+      </button>
+    );
+  if (state.total === 0) return null;
+  return (
+    <button className="btn tilt" onClick={() => scan.start(t)}>
+      volver a escanear
+    </button>
+  );
+}
+
+// A clock for the countdowns: ticks every second while `on`.
+function useTick(on: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!on) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [on]);
+  return now;
+}
+
+function usePageHidden() {
+  const [hidden, setHidden] = useState(() => document.visibilityState === 'hidden');
+  useEffect(() => {
+    const on = () => setHidden(document.visibilityState === 'hidden');
+    document.addEventListener('visibilitychange', on);
+    return () => document.removeEventListener('visibilitychange', on);
+  }, []);
+  return hidden;
+}
+
+// What the scan is doing: phase (announced), progress bar, the stops in flight or the last
+// check, and the countdown to the next one.
+function ScanPanel({ state, nameOf }: { state: ScanState; nameOf: (id: string) => string }) {
+  const now = useTick(!!state.target);
+  const hidden = usePageHidden();
+  const info = scanInfo(state, now, hidden, nameOf);
+  return (
+    <div className="scan-panel">
+      <p className="scan-phase" role="status" aria-live="polite">
+        {info.phase}
+      </p>
+      {info.bar !== null && (
+        <span
+          className="scan-bar"
+          role="progressbar"
+          aria-label="paradas comprobadas"
+          aria-valuemin={0}
+          aria-valuemax={state.total}
+          aria-valuenow={state.upto - state.inFlight.length}
+        >
+          <i style={{ width: `${Math.round(info.bar * 100)}%` }} />
+        </span>
+      )}
+      {info.detail && <p className="status">{info.detail}</p>}
+      {info.next && <p className="status">{info.next}</p>}
+    </div>
   );
 }
 
@@ -461,9 +614,7 @@ export default function LineTab(p: {
           <div className="board-mode">
             <ScanControls state={state} picked={picked} stopId={stop.id} scan={scan} />
           </div>
-          <p className="status" role="status" aria-live="polite">
-            {scanStatus(state, nameOf)}
-          </p>
+          <ScanPanel state={state} nameOf={nameOf} />
           {own && <p className="status">{OWN_TEXT[own]}</p>}
           {pattern && data && (
             <PatternStops pattern={pattern} stopId={stop.id} state={state} data={data} />

@@ -782,7 +782,8 @@ p.next {
   .toast span,
   .turn,
   .bar-menu,
-  .views-row {
+  .views-row,
+  .scan-chip.checking {
     animation: none;
   }
 
@@ -1284,7 +1285,47 @@ p.next {
   line-height: 1.3;
 }
 
-/* Pivot "línea" */
+/* Pivot "escáner" */
+.scan-panel {
+  margin-top: 12px;
+}
+
+.scan-phase {
+  margin: 0;
+  font-size: var(--t-body);
+}
+
+.scan-bar {
+  display: block;
+  height: 4px;
+  margin: 8px 0 4px;
+  background: var(--bar);
+  overflow: hidden;
+}
+
+.scan-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 300ms ease-out;
+}
+
+.scan-chip.checking {
+  color: var(--accent);
+  animation: scan-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes scan-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.line-stops li.hit .stop-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .line-picks {
   flex-wrap: wrap;
 }
