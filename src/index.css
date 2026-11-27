@@ -1321,6 +1321,11 @@ p.next {
   }
 }
 
+.line-stops li.more {
+  color: var(--muted);
+  font-size: var(--t-small);
+}
+
 .line-stops li.hit .stop-name {
   color: var(--accent);
   font-weight: 600;
@@ -1364,10 +1369,6 @@ p.next {
 .line-stops .stop-town {
   color: var(--muted);
   font-weight: 300;
-}
-
-.line-stops li.passed {
-  opacity: 0.5;
 }
 
 .line-stops li.here,

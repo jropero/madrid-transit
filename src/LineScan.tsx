@@ -400,7 +400,6 @@ type Names = { names: Map<string, string>; towns: Map<string, string> };
 function StopRow(p: {
   id: string;
   here: boolean;
-  after: boolean;
   hit: boolean;
   scan: StopScan | undefined;
   est: Date | null;
@@ -408,7 +407,7 @@ function StopRow(p: {
 }) {
   const name = p.data?.names.get(p.id) ?? p.id;
   const town = p.data?.towns.get(p.id);
-  const cls = [p.here && 'here', p.after && 'passed', p.hit && 'hit'].filter(Boolean).join(' ');
+  const cls = [p.here && 'here', p.hit && 'hit'].filter(Boolean).join(' ');
   return (
     <li className={cls || undefined} aria-current={p.here || undefined}>
       <span className="stop-name">
@@ -417,30 +416,65 @@ function StopRow(p: {
       </span>
       {p.here && <span className="scan-chip">esta parada</span>}
       {p.here && p.est && <span className="scan-chip est">estimado {hhmm(p.est)}</span>}
-      {!p.here && !p.after && (
+      {!p.here && (
         <span className={`scan-chip ${p.scan?.k ?? 'idle'}`}>{chipText(p.scan)}</span>
       )}
     </li>
   );
 }
 
-// The chosen pattern's stops in order, with each one's scan state.
+// How many of the earlier stops (nearest first) the list shows: every stop up to the farthest
+// one checked or in flight. Batches go nearest first, so that is a prefix of `order`.
+export function revealed(order: string[], scans: Record<string, unknown>, inFlight: string[]) {
+  let n = 0;
+  order.forEach((id, i) => {
+    if (id in scans || inFlight.includes(id)) n = i + 1;
+  });
+  return n;
+}
+console.assert(
+  revealed(['a', 'b', 'c', 'd'], {}, []) === 0 &&
+    revealed(['a', 'b', 'c', 'd'], { a: 1 }, ['b', 'c']) === 3 &&
+    revealed(['a', 'b', 'c', 'd'], { a: 1, b: 1, c: 1, d: 1 }, []) === 4,
+  'revealed',
+);
+
+const earlier = (n: number) => `${n} ${n === 1 ? 'parada anterior' : 'paradas anteriores'}`;
+const notCheckedText = (n: number, started: boolean) =>
+  `${earlier(n)}${started ? ' sin comprobar' : ': se muestran al escanearlas'}`;
+
+// This stop first, then the earlier stops in scan order (nearest first, going down), each
+// appearing once its check starts; the stops after this one are not shown.
 function PatternStops(p: { pattern: Pattern; stopId: string; state: ScanState; data: Names }) {
-  const hereAt = p.pattern.findIndex(([id]) => id === p.stopId);
+  const { state } = p;
+  const order = scanOrder(p.pattern, p.stopId).map(s => s.id);
+  const n = revealed(order, state.scans, state.inFlight);
+  const rest = order.length - n;
   return (
-    <ol className="line-stops" aria-label="Paradas de la línea">
-      {p.pattern.map(([id], i) => (
+    <ol
+      className="line-stops"
+      aria-label="Esta parada y las anteriores, la más cercana primero"
+    >
+      <StopRow
+        id={p.stopId}
+        here
+        hit={false}
+        scan={undefined}
+        est={state.rows[0]?.when ?? null}
+        data={p.data}
+      />
+      {order.slice(0, n).map(id => (
         <StopRow
-          key={`${id}-${i}`}
+          key={id}
           id={id}
-          here={i === hereAt}
-          after={hereAt >= 0 && i > hereAt}
-          hit={id === p.state.hit}
-          scan={p.state.inFlight.includes(id) ? { k: 'checking' } : p.state.scans[id]}
-          est={i === hereAt ? (p.state.rows[0]?.when ?? null) : null}
+          here={false}
+          hit={id === state.hit}
+          scan={state.inFlight.includes(id) ? { k: 'checking' } : state.scans[id]}
+          est={null}
           data={p.data}
         />
       ))}
+      {rest > 0 && <li className="more">{notCheckedText(rest, !!state.target)}</li>}
     </ol>
   );
 }
