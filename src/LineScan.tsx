@@ -275,6 +275,48 @@ export function scanInfo(
   const at = s.finishedAt === null ? '' : `comprobado a las ${hhmm(new Date(s.finishedAt))}`;
   return { phase: idleInfo(s), detail: at, next: '', bar };
 }
+// The one-line progress under salidas' "estima tiempo" (no stop names: it stays short).
+export function estimateText(s: ScanState, now: number): string {
+  if (!s.target) return '';
+  if (s.failed) return 'no se pudo cargar el recorrido de la línea';
+  if (s.hit && s.rows.length)
+    return `bus en vivo ${stopsText(s.away)} antes: llega hacia las ${hhmm(s.rows[0].when)}`;
+  return s.running ? searchingText(s, now) : idleInfo(s);
+}
+
+function searchingText(s: ScanState, now: number): string {
+  const base = `buscando un bus en vivo · ${s.upto - s.inFlight.length} de ${s.total} paradas`;
+  const waited = s.inFlight.length && s.batchAt !== null ? now - s.batchAt : 0;
+  return waited > SLOW_MS ? `${base} · esperando al CRTM ${secs(waited)}` : base;
+}
+console.assert(
+  (() => {
+    const t = { stopId: 'a', routeId: 'r', head: 'h', pi: 0 };
+    const run = {
+      ...EMPTY,
+      target: t,
+      running: true,
+      total: 9,
+      upto: 6,
+      inFlight: ['x', 'y', 'z'],
+    };
+    const row = { when: new Date('2026-11-26T14:34:00Z') } as CrtmRow;
+    return (
+      estimateText(EMPTY, 0) === '' &&
+      estimateText({ ...run, batchAt: 0 }, 1000) ===
+        'buscando un bus en vivo · 3 de 9 paradas' &&
+      estimateText({ ...run, batchAt: 0 }, 8000).endsWith(' · esperando al CRTM 8 s') &&
+      estimateText(
+        { ...EMPTY, target: t, hit: 'b', rows: [row], away: 4, finishedAt: 1 },
+        0,
+      ) === 'bus en vivo 4 paradas antes: llega hacia las 15:34' &&
+      estimateText({ ...EMPTY, target: t, total: 9, finishedAt: 1 }, 0) ===
+        'sin buses en vivo en las 9 paradas anteriores'
+    );
+  })(),
+  'estimateText',
+);
+
 console.assert(
   (() => {
     const base = { ...EMPTY, target: { stopId: 'a', routeId: 'r', head: 'h', pi: 0 } };
@@ -555,7 +597,7 @@ function AgainButton({ state, scan }: { state: ScanState; scan: LineScanApi }) {
 }
 
 // A clock for the countdowns: ticks every second while `on`.
-function useTick(on: boolean) {
+export function useTick(on: boolean) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!on) return;

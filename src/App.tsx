@@ -13,7 +13,7 @@ import RefreshBar, { CRTM_REFRESH_MS, REFRESH_MS } from './RefreshBar.tsx';
 import NextStops, { TrainPicker } from './NextStops.tsx';
 import { usePivot, type PivotDrag } from './pivot.ts';
 import AlertsTab from './AlertsTab.tsx';
-import LineTab, { useLineScan } from './LineScan.tsx';
+import LineTab, { estimateText, useLineScan, useTick, type ScanState } from './LineScan.tsx';
 import Settings from './Settings.tsx';
 import StatusNote from './StatusNote.tsx';
 import { useLdEnabled } from './ld.ts';
@@ -511,19 +511,57 @@ const modeLabel = (d: Departure) => {
   return d.bus ? 'bus' : 'cercanías';
 };
 
-// "estima tiempo" on a bus / light-rail line without live times: starts the escáner scan for
-// that line + direction and shows the escáner tab (provided by App; null where not possible).
-const EstimateCtx = createContext<((d: Departure) => void) | null>(null);
+// "estima tiempo" on a bus / light-rail line without live times: runs the escáner scan for
+// that line + direction from salidas itself (provided by App; null where not possible). `key`
+// is the line group that started the current scan.
+type Estimator = {
+  start: (d: Departure, key: string) => void;
+  key: string | null;
+  state: ScanState;
+};
+const EstimateCtx = createContext<Estimator | null>(null);
 
-function EstimateButton({ list, from }: { list: Departure[]; from: boolean }) {
-  const estimate = useContext(EstimateCtx);
-  const head = list[0];
-  if (!estimate || from || !head.bus || list.some(d => d.live)) return null;
+// The group's share of the estimator: whether the running scan is this group's, and a start
+// that collapses the group once that scan finds a bus (only the first time, not on repeats).
+function useEstimate(lineKey: string, collapse: () => void) {
+  const est = useContext(EstimateCtx);
+  const mine = !!est?.state.target && est.key === lineKey;
+  const found = mine && !!est?.state.hit && !!est.state.rows.length;
+  const waiting = useRef(false);
+  useEffect(() => {
+    if (!found || !waiting.current) return;
+    waiting.current = false;
+    collapse();
+  }, [found, collapse]);
+  const start = (d: Departure) => {
+    waiting.current = true;
+    est?.start(d, lineKey);
+  };
+  return { est, mine, start };
+}
+
+function EstimateButton(p: {
+  list: Departure[];
+  from: boolean;
+  est: ReturnType<typeof useEstimate>;
+}) {
+  const head = p.list[0];
+  const { est, mine, start } = p.est;
+  const running = mine && !!est?.state.running;
+  const now = useTick(running);
+  const covered = p.list.some(d => d.live || d.estimated);
+  if (!est || p.from || !head.bus || (covered && !mine)) return null;
+  const line = mine ? estimateText(est.state, now) : '';
   return (
-    <div className="board-mode estimate">
-      <button className="btn tilt" onClick={() => estimate(head)}>
-        estima tiempo
-      </button>
+    <div className="estimate">
+      <div className="board-mode">
+        <button className="btn tilt" disabled={running} onClick={() => start(head)}>
+          {running ? 'estimando…' : 'estima tiempo'}
+        </button>
+      </div>
+      <p className="status" role="status" aria-live="polite">
+        {line}
+      </p>
     </div>
   );
 }
@@ -551,6 +589,8 @@ function LineGroup({
   onSelect: (s: Saved, el: HTMLElement, lineKey: string) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const collapse = useCallback(() => setOpen(false), []);
+  const est = useEstimate(lineKey, collapse);
   const [picked, setPicked] = useState<string | null>(null);
   const head = list[0];
   const followed = list.find(d => d.tripId === picked) ?? head;
@@ -590,7 +630,7 @@ function LineGroup({
               onPick={setPicked}
             />
           )}
-          <EstimateButton list={list} from={from} />
+          <EstimateButton list={list} from={from} est={est} />
           <NextStops
             key={followed.tripId}
             dep={followed}
@@ -1432,12 +1472,17 @@ export default function App() {
 
   // "estima tiempo" in a line group: scan that line + direction from this stop, on escáner.
   const stopId = nav.stop.id;
-  const estimate = isBus(stopFile)
-    ? (d: Departure) => {
-        const o = optionFor(lineOptions(stopFile), d.routeId, d.dest);
-        if (!o) return;
-        scan.start({ stopId, ...o });
-        goTo('line');
+  const [estKey, setEstKey] = useState<string | null>(null);
+  const estimate: Estimator | null = isBus(stopFile)
+    ? {
+        start: (d, key) => {
+          const o = optionFor(lineOptions(stopFile), d.routeId, d.dest);
+          if (!o) return;
+          setEstKey(key);
+          scan.start({ stopId, ...o });
+        },
+        key: estKey,
+        state: scan.state,
       }
     : null;
 
