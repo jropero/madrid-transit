@@ -1,24 +1,42 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { loadTimetable, probeFeed } from './data.ts';
-import { ddmm, healthChecks, healthLine, loadSaved, type Health } from './gtfs.ts';
+import {
+  ddmm,
+  healthChecks,
+  healthLine,
+  moveSaved,
+  short,
+  type Health,
+  type Saved,
+  type ProbeResult,
+} from './gtfs.ts';
+import HealthDialog from './HealthDialog.tsx';
 import { THEMES, applyTheme, loadTheme, type Theme } from './theme.ts';
 import { setLdEnabled, useLdEnabled } from './ld.ts';
 import { ACCENTS, applyAccent, loadAccent, type AccentName } from './accent.ts';
 
-type HealthRow = { key: string; label: string; health?: Health };
+type HealthRow = {
+  key: string;
+  label: string;
+  query: string;
+  health?: Health;
+  probe?: ProbeResult;
+};
 
 // "estado de las fuentes": probes every feed in parallel and fills each line as it finishes.
-function SourceHealth() {
+function SourceHealth({ stops }: { stops: Saved[] }) {
   const [rows, setRows] = useState<HealthRow[]>([]);
   const [running, setRunning] = useState(false);
+  const [shown, setShown] = useState<string | null>(null);
+  const open = rows.find(r => r.key === shown);
   const run = () => {
-    const checks = healthChecks(loadSaved());
-    setRows(checks.map(c => ({ key: c.key, label: c.label })));
+    const checks = healthChecks(stops);
+    setRows(checks.map(c => ({ key: c.key, label: c.label, query: c.query })));
     setRunning(true);
     const done = checks.map(c =>
       probeFeed(c).then(p => {
         const health = healthLine(c.kind, p, new Date());
-        setRows(prev => prev.map(r => (r.key === c.key ? { ...r, health } : r)));
+        setRows(prev => prev.map(r => (r.key === c.key ? { ...r, health, probe: p } : r)));
       }),
     );
     void Promise.all(done).then(() => setRunning(false));
@@ -34,16 +52,109 @@ function SourceHealth() {
       <ul className="health" aria-live="polite">
         {rows.map(r => (
           <li key={r.key} className={r.health ? `health-${r.health.level}` : undefined}>
-            <span className="health-label">{r.label}</span>
-            <span>{r.health?.text ?? 'comprobando…'}</span>
+            {r.health && r.probe ? (
+              <button
+                className="health-open tilt"
+                aria-haspopup="dialog"
+                onClick={() => setShown(r.key)}
+              >
+                <span className="health-label">{r.label}</span>
+                <span>{r.health.text} ›</span>
+              </button>
+            ) : (
+              <>
+                <span className="health-label">{r.label}</span>
+                <span>comprobando…</span>
+              </>
+            )}
           </li>
         ))}
       </ul>
+      {open?.health && open.probe && (
+        <HealthDialog
+          item={{
+            label: open.label,
+            query: open.query,
+            health: open.health,
+            probe: open.probe,
+          }}
+          onClose={() => setShown(null)}
+        />
+      )}
     </>
   );
 }
 
-export default function Settings() {
+type Pending = { id: string; delta: -1 | 1 };
+
+// "paradas guardadas": reorder the saved stops; the departures pivot follows this order.
+function SavedOrder({ stops, onStops }: { stops: Saved[]; onStops: (next: Saved[]) => void }) {
+  const buttons = useRef(new Map<string, HTMLButtonElement>());
+  const pending = useRef<Pending | null>(null);
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    const p = pending.current;
+    pending.current = null;
+    if (!p) return;
+    const same = buttons.current.get(`${p.id}:${p.delta}`);
+    const other = buttons.current.get(`${p.id}:${-p.delta}`);
+    (same && !same.disabled ? same : other)?.focus();
+  }, [stops]);
+  const move = (index: number, delta: -1 | 1) => {
+    const next = moveSaved(stops, index, delta);
+    if (next === stops) return;
+    const { id, name } = stops[index];
+    pending.current = { id, delta };
+    setNote(`${short(name)}: posición ${index + delta + 1} de ${stops.length}`);
+    onStops(next);
+  };
+  const ref = (key: string) => (el: HTMLButtonElement | null) => {
+    if (el) buttons.current.set(key, el);
+    else buttons.current.delete(key);
+  };
+  return (
+    <>
+      <h2 className="title">paradas guardadas</h2>
+      {stops.length === 0 && <p className="saved-empty">no hay paradas guardadas</p>}
+      <ol className="saved-order">
+        {stops.map((s, i) => (
+          <li key={s.id}>
+            <span className="saved-name">{short(s.name)}</span>
+            <button
+              ref={ref(`${s.id}:-1`)}
+              className="btn tilt"
+              aria-label={`Subir ${short(s.name)}`}
+              disabled={i === 0}
+              onClick={() => move(i, -1)}
+            >
+              <span aria-hidden="true">↑</span>
+            </button>
+            <button
+              ref={ref(`${s.id}:1`)}
+              className="btn tilt"
+              aria-label={`Bajar ${short(s.name)}`}
+              disabled={i === stops.length - 1}
+              onClick={() => move(i, 1)}
+            >
+              <span aria-hidden="true">↓</span>
+            </button>
+          </li>
+        ))}
+      </ol>
+      <span className="sr-only" aria-live="polite">
+        {note}
+      </span>
+    </>
+  );
+}
+
+export default function Settings({
+  stops,
+  onStops,
+}: {
+  stops: Saved[];
+  onStops: (next: Saved[]) => void;
+}) {
   const [accent, setAccent] = useState<AccentName>(loadAccent);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const ld = useLdEnabled();
@@ -56,6 +167,7 @@ export default function Settings() {
   }, []);
   return (
     <>
+      <SavedOrder stops={stops} onStops={onStops} />
       <h2 className="title">tema</h2>
       <div className="themes" role="group" aria-label="tema">
         {THEMES.map(t => (
@@ -94,7 +206,7 @@ export default function Settings() {
           />
         ))}
       </div>
-      <SourceHealth />
+      <SourceHealth stops={stops} />
       <h2 className="title">acerca de</h2>
       <p className="about">
         Cercanías: horarios y retrasos en tiempo real de Renfe. Autobuses interurbanos, Metro,

@@ -6,6 +6,7 @@ import {
   isOffline,
   loadRoute,
   loadStopNames,
+  loadStopTowns,
 } from './data.ts';
 import {
   expectedTimes,
@@ -26,7 +27,11 @@ import {
 } from './gtfs.ts';
 import { useLdEnabled } from './ld.ts';
 
-type Loaded = { pattern: Pattern | null; names: Map<string, string> };
+type Loaded = {
+  pattern: Pattern | null;
+  names: Map<string, string>;
+  towns: Map<string, string>;
+};
 
 // The vehicle's pattern: exact for timetable rows, else matched on the destination.
 function choose(
@@ -40,6 +45,20 @@ function choose(
   const name = names.get(dest) ?? dest;
   return patterns[pickPattern(patterns, stopId, name, id => names.get(id))] ?? null;
 }
+
+// Per stop: its town when it differs from the last known one (`start` = the current stop's), else ''.
+function townChanges(towns: string[], start: string): string[] {
+  let last = start;
+  return towns.map(t => {
+    const entering = t && t !== last ? t : '';
+    last = t || last;
+    return entering;
+  });
+}
+console.assert(
+  townChanges(['A', 'A', '', 'B', 'B'], 'A').join() === ',,,B,',
+  'townChanges marks only the stops entering a new town',
+);
 
 // Remaining stops of the next departure of a line, with estimated times (base: the departure's
 // live or planned time at this stop plus the pattern's offsets). Buses, light rail, Metro, EMT.
@@ -58,9 +77,10 @@ function PlainStops({
   const { routeId, pi, dest } = dep;
   useEffect(() => {
     let current = true;
-    Promise.all([loadRoute(routeId), loadStopNames()]).then(
-      ([route, names]) =>
-        current && setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names }),
+    Promise.all([loadRoute(routeId), loadStopNames(), loadStopTowns()]).then(
+      ([route, names, towns]) =>
+        current &&
+        setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names, towns }),
       err => current && setLoaded(isOffline(err) ? 'offline' : 'error'),
     );
     return () => {
@@ -84,11 +104,27 @@ function PlainStops({
         {loaded === 'offline' ? 'sin conexión · paradas no guardadas' : 'sin paradas'}
       </p>
     );
+  const { names, towns } = loaded as Loaded;
+  const origin = towns.get(stopId) ?? '';
+  const entering = townChanges(
+    rows.map(r => towns.get(r.id) ?? ''),
+    origin,
+  );
   return (
     <ol className="next" id={id}>
+      {origin && (
+        <li className="town" key="town-origin">
+          {origin}
+        </li>
+      )}
       {rows.map((r, i) => {
-        const name = (loaded as Loaded).names.get(r.id) ?? r.id;
-        return (
+        const name = names.get(r.id) ?? r.id;
+        return [
+          entering[i] && (
+            <li key={`town-${r.id}-${i}`} className="town">
+              {entering[i]}
+            </li>
+          ),
           <li key={`${r.id}-${i}`}>
             <span className="at">{hhmm(r.at)}</span>
             {r.id === stopId ? (
@@ -102,8 +138,8 @@ function PlainStops({
                 <span>{name}</span>
               </button>
             )}
-          </li>
-        );
+          </li>,
+        ];
       })}
     </ol>
   );
@@ -294,9 +330,10 @@ function usePattern(dep: Departure, stopId: string) {
   const { routeId, pi, dest } = dep;
   useEffect(() => {
     let current = true;
-    Promise.all([loadRoute(routeId), loadStopNames()]).then(
-      ([route, names]) =>
-        current && setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names }),
+    Promise.all([loadRoute(routeId), loadStopNames(), loadStopTowns()]).then(
+      ([route, names, towns]) =>
+        current &&
+        setLoaded({ pattern: choose(pi, dest, stopId, route.p, names), names, towns }),
       err => current && setLoaded(isOffline(err) ? 'offline' : 'error'),
     );
     return () => {

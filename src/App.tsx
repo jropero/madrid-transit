@@ -691,6 +691,16 @@ function StopsRow({
 }
 
 // The timetable file ends at `days.to`: warn a week ahead so it gets rebuilt in time.
+// Bus and light rail stops carry the town in the title (street names repeat across towns), so
+// the subtitle keeps only the rest.
+function stopHeading(id: string, info: Stop | undefined) {
+  const titleTown = /^par_(8|9|10)_/.test(id) ? (info?.town ?? '') : '';
+  const subtitle = [titleTown ? '' : info?.town, stopCodeLabel(info, id)]
+    .filter(Boolean)
+    .join(' · ');
+  return { titleTown, subtitle };
+}
+
 function expiryNote(tt: Timetable | null, now: Date, bus: boolean) {
   if (!tt || bus) return '';
   const today = madridDate(now);
@@ -1048,7 +1058,7 @@ function Departures({
   const info = useStopInfo(selected.id, stopById, !!tt);
   const [infoOpen, toggleInfo] = useInfoToggle(selected.id);
   const wa = info?.wa ?? false;
-  const subtitle = [info?.town, stopCodeLabel(info, selected.id)].filter(Boolean).join(' · ');
+  const { titleTown, subtitle } = stopHeading(selected.id, info);
   const routeIds = useMemo(() => new Set(deps.map(d => d.routeId)), [deps]);
   const lines = useMemo(() => new Set(deps.map(d => d.line.toLowerCase())), [deps]);
   const board = useAlertBoard(alerts, routeIds, lines);
@@ -1131,7 +1141,8 @@ function Departures({
       <Trail trail={trail} />
       <div className="title-row">
         <h2 className="title">
-          {short(selected.name)} <AccessMark on={wa} />
+          {short(selected.name)}
+          {titleTown && <span className="title-town"> {titleTown}</span>} <AccessMark on={wa} />
           <InfoButton open={infoOpen} panelId={INFO_PANEL} onToggle={toggleInfo} />
         </h2>
         <WeatherMark lat={info?.lat} lon={info?.lon} />
@@ -1407,7 +1418,7 @@ export default function App() {
             onStops={updateStops}
           />,
         )}
-        {pane('settings', <Settings />)}
+        {pane('settings', <Settings stops={stops} onStops={updateStops} />)}
       </div>
       <p className="toast" role="status" aria-live="polite">
         {toast && <span>Vuelve atrás otra vez para salir</span>}

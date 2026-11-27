@@ -437,6 +437,13 @@ p.next {
   color: var(--late);
 }
 
+.next li.town {
+  margin-top: 6px;
+  font-size: var(--t-small, 0.85em);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .next li.passed {
   opacity: 0.5;
 }
@@ -960,6 +967,38 @@ p.next {
   color: var(--on-accent);
 }
 
+/* Saved-stop order: name grows, two compact buttons. */
+.saved-order {
+  list-style: none;
+  margin: 0 0 32px;
+  padding: 0;
+}
+
+.saved-order li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.saved-order .saved-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 300;
+}
+
+.saved-order .btn {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
+
+.saved-empty {
+  color: var(--muted);
+  margin: 0 0 32px;
+}
+
 .swatches {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -999,6 +1038,43 @@ p.next {
   margin-bottom: 8px;
 }
 
+.health-open {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.health-dialog {
+  width: min(92vw, 40rem);
+  max-height: 85vh;
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--muted);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--t-small);
+}
+
+.health-dialog::backdrop {
+  background: rgb(0 0 0 / 60%);
+}
+
+.health-dialog p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.health-dialog .status-why-body {
+  max-height: 50vh;
+  margin-bottom: 12px;
+}
+
 .health-label {
   color: var(--fg);
 }
@@ -1034,6 +1110,11 @@ p.next {
   flex: 1;
   min-width: 0;
   margin: 0;
+}
+
+.title-row .title-town {
+  color: var(--muted);
+  font-weight: 300;
 }
 
 .weather {

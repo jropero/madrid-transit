@@ -1951,6 +1951,28 @@ export const loadSaved = (): Saved[] => {
 };
 export const saveSaved = (stops: Saved[]) => saveJson(STOPS_KEY, stops);
 
+// Swaps a saved stop with its neighbour; an out-of-range move returns the same array.
+export const moveSaved = (stops: Saved[], index: number, delta: -1 | 1): Saved[] => {
+  const to = index + delta;
+  if (index < 0 || index >= stops.length || to < 0 || to >= stops.length) return stops;
+  const next = [...stops];
+  [next[index], next[to]] = [next[to], next[index]];
+  return next;
+};
+{
+  const abc = [
+    { id: 'a', name: 'A' },
+    { id: 'b', name: 'B' },
+    { id: 'c', name: 'C' },
+  ];
+  const ids = (x: Saved[]) => x.map(v => v.id).join('');
+  console.assert(ids(moveSaved(abc, 1, -1)) === 'bac', 'moveSaved up');
+  console.assert(ids(moveSaved(abc, 1, 1)) === 'acb', 'moveSaved down');
+  console.assert(moveSaved(abc, 0, -1) === abc, 'moveSaved first up');
+  console.assert(moveSaved(abc, 2, 1) === abc, 'moveSaved last down');
+  console.assert(ids(abc) === 'abc', 'moveSaved does not mutate');
+}
+
 export const hhmm = (d: Date) =>
   d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: MADRID });
 
@@ -2181,14 +2203,24 @@ export function pickPattern(
   return named >= 0 ? named : longest(() => true);
 }
 
+// Some feeds chain a bus's laps into one trip (CRTM 256: Madrid > Daganzo > Madrid, 13 times):
+// cut at the first stop already seen, keeping it only as the very last one (circular line).
+function oneLap(rest: Pattern, stopId: string): Pattern {
+  const seen = new Set([stopId]);
+  const end = rest.findIndex(([id]) => seen.size === seen.add(id).size);
+  if (end < 0) return rest;
+  return end === rest.length - 1 && rest[end][0] === stopId ? rest : rest.slice(0, end);
+}
+
 // The stops after `stopId` with estimated times: `at` is when the vehicle leaves `stopId`
 // (planned, live or estimated), later stops add the pattern's offset difference.
 export function nextStops(p: Pattern, stopId: string, at: Date): StopTime[] {
   const i = stopIndex(p, stopId);
   if (i < 0) return [];
-  return p
-    .slice(i + 1)
-    .map(([id, off]) => ({ id, at: new Date(at.getTime() + (off - p[i][1]) * 1000) }));
+  return oneLap(p.slice(i + 1), stopId).map(([id, off]) => ({
+    id,
+    at: new Date(at.getTime() + (off - p[i][1]) * 1000),
+  }));
 }
 console.assert(
   (() => {
@@ -2211,6 +2243,23 @@ console.assert(
       t[0].at.toISOString() === '2026-11-25T09:02:00.000Z' &&
       t[1].at.toISOString() === '2026-11-25T09:04:00.000Z' &&
       nextStops(long, 'zz', new Date()).length === 0 &&
+      oneLap(
+        [
+          ['b', 1],
+          ['c', 2],
+          ['a', 3],
+          ['b', 4],
+          ['c', 5],
+        ],
+        'a',
+      ).length === 2 &&
+      oneLap(
+        [
+          ['b', 1],
+          ['a', 2],
+        ],
+        'a',
+      ).length === 2 &&
       pickPattern([short, long], 'a', 'de', nameOf) === 1 &&
       pickPattern([short, long], 'a', 'calle c', nameOf) === 0 &&
       pickPattern([short, long], 'a', 'nowhere', nameOf) === 1 &&
@@ -2783,7 +2832,10 @@ export type ProbeResult = {
   json: unknown;
   error?: 'timeout' | 'network';
   limitMs: number; // the timeout that applied
+  text?: string; // the response body as received (first PROBE_TEXT_MAX chars)
+  at?: number; // when the request started (ms)
 };
+export const PROBE_TEXT_MAX = 20_000;
 export type Health = { level: 'ok' | 'warn' | 'bad'; text: string };
 
 const CRTM_SAVED = /^par_((?:8|10|4)_\d+)$/;

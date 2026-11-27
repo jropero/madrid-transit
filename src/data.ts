@@ -19,6 +19,7 @@ import {
   isLiveStale,
   type FeedNote,
   type ProbeCheck,
+  PROBE_TEXT_MAX,
   type ProbeResult,
   type UpstreamError,
   type VehiclePositions,
@@ -160,7 +161,7 @@ export async function probeFeed(check: ProbeCheck): Promise<ProbeResult> {
     () => ctl.abort(new DOMException('no response', 'TimeoutError')),
     limitMs,
   );
-  const out: ProbeResult = { status: 0, ms: 0, ageS: 0, json: null, limitMs };
+  const out: ProbeResult = { status: 0, ms: 0, ageS: 0, json: null, limitMs, at: started };
   try {
     // no-store: rt.php lets browsers keep a fresh copy up to 30 s, which would skip the server.
     const res = await fetch(`${base}rt.php?${check.query}`, {
@@ -170,7 +171,13 @@ export async function probeFeed(check: ProbeCheck): Promise<ProbeResult> {
     out.status = res.status;
     out.ageS = dataAgeMs(res) / 1000;
     out.upstream = upstreamHeader(res);
-    out.json = await res.json().catch(() => null);
+    const text = await res.text();
+    out.text = text.slice(0, PROBE_TEXT_MAX);
+    try {
+      out.json = JSON.parse(text);
+    } catch {
+      out.json = null;
+    }
   } catch (err) {
     out.error = isTimeout(err) ? 'timeout' : 'network';
   } finally {
@@ -216,6 +223,15 @@ export const loadStopNames = () =>
     namesMemo,
     'all',
     async () => new Map((await loadAllStops()).map(s => [s.id, s.name] as const)),
+  );
+
+// Stop id -> town (empty when unknown), to mark where a line crosses into another town.
+const townsMemo = new Map<string, Promise<Map<string, string>>>();
+export const loadStopTowns = () =>
+  memo(
+    townsMemo,
+    'all',
+    async () => new Map((await loadAllStops()).map(s => [s.id, s.town ?? ''] as const)),
   );
 
 // Stop patterns of one route, loaded the first time its line is opened (the service worker
