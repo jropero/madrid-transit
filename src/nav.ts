@@ -95,5 +95,18 @@ export function useStopNav(initial: Saved) {
     write(n, true);
   };
 
-  return { nav, select, jump, toast };
+  // From a pivot view (escáner): the stop opens on salidas above the pivot entry, which keeps the
+  // stop it came from, so back returns to that view and stop. The trail gives the app bar a back.
+  const visit = (stop: Saved) => {
+    if (stop.id === nav.stop.id) return;
+    history.replaceState(
+      { ...(history.state as object), stop: nav.stop, trail: nav.trail },
+      '',
+    );
+    const n: Nav = { stop, trail: [...(nav.trail ?? [nav.stop]), stop] };
+    setNav(n);
+    history.pushState(entry(n), '');
+  };
+
+  return { nav, select, jump, visit, toast };
 }

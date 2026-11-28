@@ -1663,7 +1663,7 @@ async function pickOption(file: BusFile, stopId: string, d: Departure, arrivals:
 
 export default function App() {
   const [stops, setStops] = useState<Saved[]>(loadSaved);
-  const { nav, select, jump, toast } = useStopNav(stops[0]);
+  const { nav, select, jump, visit, toast } = useStopNav(stops[0]);
   useWarmOffline(stops.map(s => s.id));
   usePrefetchLive(stops);
   const { ref, view, goTo, paneStyle, paneIn, drag } = usePivotViews();
@@ -1733,6 +1733,10 @@ export default function App() {
             fileError={fileError}
             routes={tt?.routes ?? null}
             scan={scan}
+            onVisit={s => {
+              visit(s);
+              goTo('departures');
+            }}
           />,
         )}
         {pane(

@@ -56,9 +56,10 @@ export type ScanTarget = {
   pi: number;
   arr?: true; // an arrivals scan: trips that END at stopId
 };
+// `all`: every live row the stop answered (every line, not only the scanned one), shown under it.
 export type StopScan =
-  | { k: 'idle' | 'checking' | 'none' | 'error' }
-  | { k: 'live'; when: Date };
+  | { k: 'idle' | 'checking' | 'none' | 'error'; all?: CrtmRow[] }
+  | { k: 'live'; when: Date; all?: CrtmRow[] };
 export type ScanState = {
   target: ScanTarget | null;
   scans: Record<string, StopScan>;
@@ -116,7 +117,10 @@ async function probeStop(id: string, t: ScanTarget): Promise<Probe> {
     const parsed = parseCrtm(feed.data, new Date());
     const rows = await directCrtm(parsed, file, id);
     const hits = hitsOf(rows, t, file);
-    const scan: StopScan = hits.length ? { k: 'live', when: hits[0].when } : { k: 'none' };
+    const all = rows.filter(r => !r.estimated && !r.scheduled); // live times only
+    const scan: StopScan = hits.length
+      ? { k: 'live', when: hits[0].when, all }
+      : { k: 'none', all };
     return { id, scan, rows: hits };
   } catch {
     return { id, scan: { k: 'error' }, rows: [] };
@@ -241,12 +245,19 @@ export function useLineScan(stopId: string) {
   }, [kept]);
 
   // The target being replaced (new scan, stop change) leaves its rows under its own stop.
+  // The scan shown for a stop is parked (paused) while another stop is selected, so back from a
+  // scanned stop's salidas finds the results again.
+  const parked = useRef(new Map<string, ScanState>());
+  const lastStop = useRef(stopId);
   useEffect(() => {
     const prev = latest.current;
     setKept(k => stashScan(k, prev));
+    if (prev.target) parked.current.set(lastStop.current, pausedState(prev));
+    lastStop.current = stopId;
     gen.current++;
     busy.current = false;
-    setState(EMPTY);
+    setState(parked.current.get(stopId) ?? EMPTY);
+    parked.current.delete(stopId);
   }, [stopId]);
 
   // Drops past rows from memory once the earliest one is over.
@@ -689,6 +700,21 @@ const chipText = (s: StopScan | undefined) => {
 
 type Names = { names: Map<string, string>; towns: Map<string, string> };
 
+// Every line's next times at a scanned stop (the scanned line is in the chip above).
+function StopTimes(p: { rows: CrtmRow[]; routes: RouteMap | null }) {
+  return (
+    <ul className="scan-rows" aria-label="Todas las salidas de esta parada">
+      {p.rows.map((r, i) => (
+        <li key={`${r.routeId}${r.issue}${i}`}>
+          <LineTile route={p.routes?.[r.routeId]} />
+          <span className="scan-dest">{short(r.dest).toLowerCase()}</span>
+          <span className="scan-time">{hhmm(r.when)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function StopRow(p: {
   id: string;
   here: boolean;
@@ -696,6 +722,8 @@ function StopRow(p: {
   scan: StopScan | undefined;
   est: Date | null;
   data: Names | null;
+  routes: RouteMap | null;
+  onVisit: (s: Saved) => void;
 }) {
   const name = p.data?.names.get(p.id) ?? p.id;
   const town = p.data?.towns.get(p.id);
@@ -703,7 +731,17 @@ function StopRow(p: {
   return (
     <li className={cls || undefined} aria-current={p.here || undefined}>
       <span className="stop-name">
-        {name}
+        {p.here ? (
+          name
+        ) : (
+          <button
+            className="stop-link"
+            onClick={() => p.onVisit({ id: p.id, name })}
+            aria-label={`Ver salidas de ${name}`}
+          >
+            {name}
+          </button>
+        )}
         {town && <span className="stop-town"> {town}</span>}
       </span>
       {p.here && <span className="scan-chip">esta parada</span>}
@@ -711,6 +749,7 @@ function StopRow(p: {
       {!p.here && (
         <span className={`scan-chip ${p.scan?.k ?? 'idle'}`}>{chipText(p.scan)}</span>
       )}
+      {!!p.scan?.all?.length && <StopTimes rows={p.scan.all} routes={p.routes} />}
     </li>
   );
 }
@@ -737,7 +776,14 @@ const notCheckedText = (n: number, started: boolean) =>
 
 // This stop first, then the earlier stops in scan order (nearest first, going down), each
 // appearing once its check starts; the stops after this one are not shown.
-function PatternStops(p: { pattern: Pattern; stopId: string; state: ScanState; data: Names }) {
+function PatternStops(p: {
+  pattern: Pattern;
+  stopId: string;
+  state: ScanState;
+  data: Names;
+  routes: RouteMap | null;
+  onVisit: (s: Saved) => void;
+}) {
   const { state } = p;
   const order = scanOrder(p.pattern, p.stopId).map(s => s.id);
   const n = revealed(order, state.scans, state.inFlight);
@@ -754,6 +800,8 @@ function PatternStops(p: { pattern: Pattern; stopId: string; state: ScanState; d
         scan={undefined}
         est={state.rows[0]?.when ?? null}
         data={p.data}
+        routes={p.routes}
+        onVisit={p.onVisit}
       />
       {order.slice(0, n).map(id => (
         <StopRow
@@ -761,9 +809,15 @@ function PatternStops(p: { pattern: Pattern; stopId: string; state: ScanState; d
           id={id}
           here={false}
           hit={id === state.hit}
-          scan={state.inFlight.includes(id) ? { k: 'checking' } : state.scans[id]}
+          scan={
+            state.inFlight.includes(id)
+              ? { k: 'checking', all: state.scans[id]?.all }
+              : state.scans[id]
+          }
           est={null}
           data={p.data}
+          routes={p.routes}
+          onVisit={p.onVisit}
         />
       ))}
       {rest > 0 && <li className="more">{notCheckedText(rest, !!state.target)}</li>}
@@ -969,6 +1023,7 @@ export default function LineTab(p: {
   fileError: string;
   routes: RouteMap | null;
   scan: LineScanApi;
+  onVisit: (s: Saved) => void; // open a scanned stop on salidas
 }) {
   const { stop, file, scan } = p;
   const { state } = scan;
@@ -1011,7 +1066,14 @@ export default function LineTab(p: {
           <ScanPanel state={state} nameOf={nameOf} />
           {own && <p className="status">{OWN_TEXT[own]}</p>}
           {pattern && data && (
-            <PatternStops pattern={pattern} stopId={stop.id} state={state} data={data} />
+            <PatternStops
+              pattern={pattern}
+              stopId={stop.id}
+              state={state}
+              data={data}
+              routes={p.routes}
+              onVisit={p.onVisit}
+            />
           )}
         </>
       )}
