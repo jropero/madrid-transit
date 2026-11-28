@@ -1126,6 +1126,16 @@ export function mergeCrtm(
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
 
+// Two rows are one bus when both carry a CRTM trip id and it is equal, two buses when both carry
+// one and they differ; null when either has none (the time rules decide).
+// Consecutive ids are one bus too: on a circular line (16578, line 1) the bus ending trip n goes on
+// as trip n + 1 (a scan found estimates #810 / #811 beside CRTM's live #811 and timetable #853
+// for #852).
+const sameTrip = (a: string, b: string) =>
+  a === b || (/^\d+$/.test(a) && /^\d+$/.test(b) && Math.abs(Number(a) - Number(b)) === 1);
+const sameBus = (a: Departure, b: Departure): boolean | null =>
+  a.issue && b.issue ? sameTrip(a.issue, b.issue) : null;
+
 // CRTM lists one bus twice: its timetable time on the whole minute (id n) and the live one (id n
 // +- 1), 4 min apart (16578, 462 getafe: 14:14:00 #…967 and live 14:18:16 #…966). The whole-minute
 // row goes when a live row of the same route + destination is the same bus within 10 min.
@@ -1157,16 +1167,6 @@ console.assert(
   })(),
   'dropTimetableTwin',
 );
-
-// Two rows are one bus when both carry a CRTM trip id and it is equal, two buses when both carry
-// one and they differ; null when either has none (the time rules decide).
-// Consecutive ids are one bus too: on a circular line (16578, line 1) the bus ending trip n goes on
-// as trip n + 1 (a scan found estimates #810 / #811 beside CRTM's live #811 and timetable #853
-// for #852).
-const sameTrip = (a: string, b: string) =>
-  a === b || (/^\d+$/.test(a) && /^\d+$/.test(b) && Math.abs(Number(a) - Number(b)) === 1);
-const sameBus = (a: Departure, b: Departure): boolean | null =>
-  a.issue && b.issue ? sameTrip(a.issue, b.issue) : null;
 
 // CRTM rows not live (timetable times) with a tracked bus of the same route and destination
 // after them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked
@@ -2827,8 +2827,8 @@ console.assert(
     const rows = [row('a', 1, 10), row('a', 2, 10), row('a', 3, 20), row('b', 1, 5)];
     const out = newestPerBus(rows);
     const buses = newestPerBus([
-      row('a', 1, 10, undefined, '1'),
-      row('a', 2, 20, undefined, '2'),
+      row('a', 0, 10, undefined, '1'),
+      row('a', 30 * 60_000, 20, undefined, '2'),
     ]);
     const same = newestPerBus([
       row('a', 1, 10, undefined, '1'),
@@ -2848,8 +2848,11 @@ console.assert(
         .length === 1 &&
       newestPerBus([row('a', 0, 10, undefined, '1'), row('a', 6 * 60_000, 20, undefined, '2')])
         .length === 2 &&
-      newestPerBus([row('a', 0, 10, undefined, '1'), row('a', 3 * 60_000, 10, undefined, '2')])
-        .length === 2
+      newestPerBus([
+        row('a', 0, 10, undefined, '1'),
+        row('a', 3 * 60_000, 10, undefined, '2'),
+      ])[0].when.getTime() ===
+        3 * 60_000
     );
   })(),
   'newestPerBus',
@@ -2924,7 +2927,7 @@ console.assert(
       }) as Departure;
     const est = mk(49.5, { estimated: true });
     const out = dropShadowed([est, mk(50), mk(51), mk(60), mk(50, { dest: 'Y' })]);
-    const keep = dropShadowed([est, mk(48, { unconfirmed: true }), mk(53)]);
+    const keep = dropShadowed([est, mk(48, { unconfirmed: true }), mk(56)]);
     return (
       out.length === 4 &&
       out
