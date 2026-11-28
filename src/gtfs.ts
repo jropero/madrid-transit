@@ -1120,9 +1120,43 @@ export function mergeCrtm(
     const own = planned.filter(d => d.routeId === routeId && (!head || d.dest === head));
     for (const d of replacedByLive(own, live)) dropped.add(d);
   }
-  const live = markUnconfirmed(inWindow.map((r, i) => crtmDeparture(r, i, routes)));
+  const live = markUnconfirmed(
+    dropTimetableTwin(inWindow.map((r, i) => crtmDeparture(r, i, routes))),
+  );
   return [...planned.filter(d => !dropped.has(d)), ...live].sort(byExpected);
 }
+
+// CRTM lists one bus twice: its timetable time on the whole minute (id n) and the live one (id n
+// +- 1), 4 min apart (16578, 462 getafe: 14:14:00 #…967 and live 14:18:16 #…966). The whole-minute
+// row goes when a live row of the same route + destination is the same bus within 10 min.
+function dropTimetableTwin(crtm: Departure[]): Departure[] {
+  const twin = (d: Departure) =>
+    !d.live &&
+    crtm.some(
+      o =>
+        o.live &&
+        o.routeId === d.routeId &&
+        o.dest === d.dest &&
+        sameBus(d, o) === true &&
+        Math.abs(o.expected.getTime() - d.expected.getTime()) <= 10 * 60_000,
+    );
+  return crtm.filter(d => !twin(d));
+}
+console.assert(
+  (() => {
+    const at = (m: number) => new Date(Date.UTC(2026, 10, 27, 20, m));
+    const row = (m: number, issue: string, live: boolean) =>
+      ({ routeId: 'r', dest: 'X', expected: at(m), issue, live }) as Departure;
+    const out = dropTimetableTwin([row(14, '967', false), row(18, '966', true)]);
+    return (
+      out.length === 1 &&
+      out[0].live &&
+      dropTimetableTwin([row(14, '967', false), row(18, '900', true)]).length === 2 &&
+      dropTimetableTwin([row(0, '967', false), row(18, '966', true)]).length === 2
+    );
+  })(),
+  'dropTimetableTwin',
+);
 
 // Two rows are one bus when both carry a CRTM trip id and it is equal, two buses when both carry
 // one and they differ; null when either has none (the time rules decide).
@@ -2855,7 +2889,7 @@ function pairCandidates(deps: Departure[], single: (routeId: string) => boolean)
 // that time is dropped, else 16578 showed "461 21:49 estimado" right above "461 21:50". Each
 // estimate takes at most one; live, estimated and "no confirmado" rows are never dropped. With
 // trip ids (`issue`): the same id is dropped at any time gap, a different id never.
-const SHADOW_MS = 2 * 60_000;
+const SHADOW_MS = 5 * 60_000; // 16578, line 1: est. 14:15 vs CRTM's 14:18:00
 const plainRow = (d: Departure) => !d.live && !d.estimated && !d.unconfirmed && !d.cancelled;
 function nearestPlain(deps: Departure[], est: Departure, gone: Set<Departure>) {
   const free = deps.filter(d => d.routeId === est.routeId && plainRow(d) && !gone.has(d));
@@ -3014,7 +3048,8 @@ console.assert(
     const far = dropShadowed([est, mk(67, { issue: '1' })]);
     const diff = dropShadowed([est, mk(53, { issue: '9' })]);
     const loose = dropShadowed([est, mk(54)]);
-    return far.length === 1 && diff.length === 2 && loose.length === 1;
+    const wide = dropShadowed([est, mk(56)]);
+    return far.length === 1 && diff.length === 2 && loose.length === 1 && wide.length === 1;
   })(),
   'dropShadowed: the same trip id is dropped at any gap, a different one never',
 );
