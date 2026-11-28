@@ -1126,8 +1126,13 @@ export function mergeCrtm(
 
 // Two rows are one bus when both carry a CRTM trip id and it is equal, two buses when both carry
 // one and they differ; null when either has none (the time rules decide).
+// Consecutive ids are one bus too: on a circular line (16578, line 1) the bus ending trip n goes on
+// as trip n + 1 (a scan found estimates #810 / #811 beside CRTM's live #811 and timetable #853
+// for #852).
+const sameTrip = (a: string, b: string) =>
+  a === b || (/^\d+$/.test(a) && /^\d+$/.test(b) && Math.abs(Number(a) - Number(b)) === 1);
 const sameBus = (a: Departure, b: Departure): boolean | null =>
-  a.issue && b.issue ? a.issue === b.issue : null;
+  a.issue && b.issue ? sameTrip(a.issue, b.issue) : null;
 
 // CRTM rows not live (timetable times) with a tracked bus of the same route and destination
 // after them get `unconfirmed` (stop 16578, line 1 at 15:30: 15:39:00 before the tracked
@@ -1170,14 +1175,14 @@ console.assert(
       ({ routeId: 'r', dest: 'X', expected: at(m), live: false, ...extra }) as Departure;
     const [same, diff] = markUnconfirmed([
       row(5, { issue: '1' }),
-      row(6, { issue: '2' }),
+      row(6, { issue: '9' }),
       row(16, { estimated: true, issue: '1' }),
     ]);
     // #1 tracked earlier (estimate at 3), a later estimate of #2: the 20 is still #1's.
     const [, mine] = markUnconfirmed([
       row(3, { estimated: true, issue: '1' }),
       row(20, { issue: '1' }),
-      row(28, { estimated: true, issue: '2' }),
+      row(28, { estimated: true, issue: '9' }),
     ]);
     return !same.unconfirmed && !!diff.unconfirmed && !mine.unconfirmed;
   })(),
@@ -2880,16 +2885,22 @@ console.assert(
 // An estimated departure and the stop's own live departure of the same line are one bus: the
 // estimate is dropped (each live row takes one, closest pairs first) and, when the two times
 // differ by 2+ min, the live row remembers it as `alsoEst`. An unpaired estimate stays.
+// Other estimates of the live row's bus (its other trip id): they stand for it too.
+const siblings = (cands: Pair[], live: Departure) =>
+  cands.filter(e => e.live === live && sameBus(e.est, live) === true).map(e => e.est);
+
 export function pairEstimates(
   deps: Departure[],
   single: (routeId: string) => boolean = () => false,
 ): Departure[] {
   const gone = new Set<Departure>();
   const taken = new Map<Departure, Pair>();
-  for (const c of pairCandidates(deps, single)) {
+  const cands = pairCandidates(deps, single);
+  for (const c of cands) {
     if (gone.has(c.est) || taken.has(c.live)) continue;
     gone.add(c.est);
     taken.set(c.live, c);
+    for (const e of siblings(cands, c.live)) gone.add(e);
   }
   return deps
     .filter(d => !gone.has(d))
@@ -2961,7 +2972,7 @@ console.assert(
     ]);
     const diff = pairEstimates([
       mk(10, { live: true, issue: '1' }),
-      mk(11, { estimated: true, issue: '2' }),
+      mk(11, { estimated: true, issue: '9' }),
     ]);
     return same.length === 1 && far.length === 2 && diff.length === 2;
   })(),
@@ -2980,7 +2991,7 @@ console.assert(
       }) as Departure;
     const est = mk(53, { estimated: true, issue: '1' });
     const far = dropShadowed([est, mk(67, { issue: '1' })]);
-    const diff = dropShadowed([est, mk(53, { issue: '2' })]);
+    const diff = dropShadowed([est, mk(53, { issue: '9' })]);
     const loose = dropShadowed([est, mk(54)]);
     return far.length === 1 && diff.length === 2 && loose.length === 1;
   })(),
