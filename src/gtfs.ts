@@ -2894,6 +2894,9 @@ function pairCandidates(deps: Departure[], single: (routeId: string) => boolean)
 // trip ids (`issue`): the same id is dropped at any time gap, a different id never.
 const SHADOW_MS = 5 * 60_000; // 16578, line 1: est. 14:15 vs CRTM's 14:18:00
 const plainRow = (d: Departure) => !d.live && !d.estimated && !d.unconfirmed && !d.cancelled;
+// Circular lines (16578, line 1): trip ids of one bus change along the loop, so a different id
+// does not mean a different bus there.
+const circular = (d: Departure) => /circular/i.test(d.dest);
 function nearestPlain(deps: Departure[], est: Departure, gone: Set<Departure>) {
   const free = deps.filter(d => d.routeId === est.routeId && plainRow(d) && !gone.has(d));
   const mine = free.find(d => sameBus(est, d) === true); // same trip id: any time gap
@@ -2902,7 +2905,8 @@ function nearestPlain(deps: Departure[], est: Departure, gone: Set<Departure>) {
   let gap = SHADOW_MS;
   for (const d of free) {
     const g = Math.abs(d.expected.getTime() - est.expected.getTime());
-    if (d.dest === est.dest && sameBus(est, d) !== false && g <= gap) [best, gap] = [d, g];
+    if (d.dest === est.dest && (sameBus(est, d) !== false || circular(d)) && g <= gap)
+      [best, gap] = [d, g];
   }
   return best;
 }
@@ -3052,7 +3056,20 @@ console.assert(
     const diff = dropShadowed([est, mk(53, { issue: '9' })]);
     const loose = dropShadowed([est, mk(54)]);
     const wide = dropShadowed([est, mk(56)]);
-    return far.length === 1 && diff.length === 2 && loose.length === 1 && wide.length === 1;
+    const circ = (a: Departure) => ({ ...a, dest: 'CIRCULAR' });
+    const plain = circ(mk(54, { issue: '9' }));
+    const circOff = dropShadowed([est, plain]);
+    const circEst = dropShadowed([circ(est), plain]);
+    const circFar = dropShadowed([circ(est), circ(mk(60, { issue: '9' }))]);
+    return (
+      far.length === 1 &&
+      diff.length === 2 &&
+      loose.length === 1 &&
+      wide.length === 1 &&
+      circOff.length === 2 &&
+      circEst.length === 1 &&
+      circFar.length === 2
+    );
   })(),
   'dropShadowed: the same trip id is dropped at any gap, a different one never',
 );
