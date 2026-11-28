@@ -2758,11 +2758,26 @@ console.assert(
 // none = 0) stays, whichever scan made it; so two buses of a line from different passes both
 // stay. Rows without an issue: the newest find per line, a tie keeps every row of it. Input
 // order is kept.
+// Finds of one line within SUPERSEDE_MS are one bus too, whatever their trip ids (16578: line 3
+// showed 13:58 and 14:01 for one bus, headway there is 40+ min): the newer pass wins, within one
+// pass the later time.
+const SUPERSEDE_MS = 5 * 60_000;
 export function newestPerBus(rows: CrtmRow[]): CrtmRow[] {
   const key = (r: CrtmRow) => `${r.routeId}|${r.dest}|${r.arr ? 1 : 0}|${r.issue || ''}`;
   const max = new Map<string, number>();
   for (const r of rows) max.set(key(r), Math.max(max.get(key(r)) ?? 0, r.found ?? 0));
-  return rows.filter(r => (r.found ?? 0) === max.get(key(r)));
+  const kept = rows.filter(r => (r.found ?? 0) === max.get(key(r)));
+  const superseded = (r: CrtmRow) =>
+    kept.some(
+      o =>
+        o.routeId === r.routeId &&
+        o.dest === r.dest &&
+        !!o.arr === !!r.arr &&
+        Math.abs(o.when.getTime() - r.when.getTime()) <= SUPERSEDE_MS &&
+        ((o.found ?? 0) > (r.found ?? 0) ||
+          ((o.found ?? 0) === (r.found ?? 0) && o.when > r.when)),
+    );
+  return kept.filter(r => !superseded(r));
 }
 console.assert(
   (() => {
@@ -2789,12 +2804,18 @@ console.assert(
       out.length === 2 &&
       out[0].when.getTime() === 3 &&
       out[1].routeId === 'b' &&
-      newestPerBus([row('a', 1, 20), row('a', 2, 20), row('a', 3, 10)]).length === 2 &&
+      newestPerBus([row('a', 1, 20), row('a', 2, 20), row('a', 3, 10)]).length === 1 &&
       newestPerBus([row('a', 1, 10), row('a', 2, 5, true)]).length === 2 &&
       newestPerBus([row('a', 1), row('a', 2, 3)]).length === 1 &&
       buses.length === 2 &&
       same.length === 1 &&
-      same[0].when.getTime() === 2
+      same[0].when.getTime() === 2 &&
+      newestPerBus([row('a', 0, 10, undefined, '1'), row('a', 3 * 60_000, 20, undefined, '2')])
+        .length === 1 &&
+      newestPerBus([row('a', 0, 10, undefined, '1'), row('a', 6 * 60_000, 20, undefined, '2')])
+        .length === 2 &&
+      newestPerBus([row('a', 0, 10, undefined, '1'), row('a', 3 * 60_000, 10, undefined, '2')])
+        .length === 2
     );
   })(),
   'newestPerBus',
